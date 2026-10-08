@@ -22,6 +22,7 @@ fn tools() -> Value {
                     "ignore_case": {"type": "boolean"},
                     "glob": {"type": "array", "items": {"type": "string"}, "description": "ripgrep-style globs, e.g. \"*.rs\" or \"!tests/**\"."},
                     "files_only": {"type": "boolean", "description": "Only list matching files."},
+                    "all_roots": {"type": "boolean", "description": "Search every configured root instead of one directory (path is ignored)."},
                     "max_matches": {"type": "integer", "description": "Default 200."}
                 },
                 "required": ["pattern"]

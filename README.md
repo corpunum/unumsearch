@@ -55,11 +55,11 @@ curl -fsSL https://github.com/corpunum/unumsearch/releases/latest/download/insta
 irm https://github.com/corpunum/unumsearch/releases/latest/download/install.ps1 | iex
 ```
 
-`UNUMSEARCH_VERSION=v0.1.1` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
+`UNUMSEARCH_VERSION=v0.1.2` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
 Every archive and `SHA256SUMS` also carry a GitHub build-provenance attestation:
 
 ```bash
-gh attestation verify unumsearch-v0.1.1-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
+gh attestation verify unumsearch-v0.1.2-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
 ```
 
 Each archive contains the binary, this README, the license, `config.example.toml`, the Agent
@@ -68,7 +68,7 @@ Skill (`skills/`) and the systemd unit (`packaging/`).
 From source (Rust 1.89 or newer):
 
 ```bash
-cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.1
+cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.2
 # or
 git clone https://github.com/corpunum/unumsearch && cd unumsearch
 cargo build --release            # target/release/unumsearch
@@ -101,6 +101,12 @@ For permanent use, put the roots in a config file (see [`config.example.toml`](c
 on macOS, `%APPDATA%\unumsearch\config.toml` on Windows). Environment variables
 (`UNUMSEARCH_ROOTS`, `UNUMSEARCH_SPLIT_ROOTS`, `UNUMSEARCH_INDEX_DIR`, `UNUMSEARCH_LISTEN`,
 `UNUMSEARCH_MAX_MEMORY_MB`, `UNUMSEARCH_MAX_FILE_SIZE`) override the file; flags override both.
+
+**Explicit roots replace the default config.** `--root`/`--split-root` without `--config` (or
+`$UNUMSEARCH_CONFIG`) do not read the platform default config file, so a private index built
+with `--root DIR --index-dir DIR` covers exactly `DIR`. (Before v0.1.2 the default file's roots
+were merged in.) `--no-default-config` skips the default file in every case; with an explicit
+`--config FILE`, `--root` adds to that file's roots.
 
 ### As a service (Linux, systemd user unit)
 
@@ -171,7 +177,7 @@ x86_64 build is cross-compiled from arm64.
 | Command | Purpose |
 | --- | --- |
 | `index [--force]` | Build or update the index once (fails if a daemon holds the writer lock). |
-| `search PATTERN [PATH]` | Content search. `-F` literal, `-i` ignore case, `-g GLOB` (repeatable), `-l` files only, `-m N` max matches, `--candidates` unverified index candidates, `--no-scan`, `--text` for `path:line:text` output. |
+| `search PATTERN [PATH]` | Content search. `-F` literal, `-i` ignore case, `-g GLOB` (repeatable), `-l` files only, `-m N` max matches, `--candidates` unverified index candidates, `--no-scan`, `--text` for `path:line:text` output, `--all-roots` every configured root. |
 | `files [PATH]` | Filename search. `-g GLOB`, `--regex RE`, `--max N`. |
 | `status` | Units, file counts, index size, freshness, RSS. |
 | `excludes` | Effective exclude patterns, e.g. for `rg --ignore-file`. |
@@ -180,7 +186,7 @@ x86_64 build is cross-compiled from arm64.
 | `rpc [--watch]` | JSON-RPC 2.0 over stdio (one message per line). |
 | `mcp [--watch]` | MCP server over stdio. |
 
-Global flags (before the command): `--config`, `--root DIR` (repeatable), `--split-root DIR`,
+Global flags (before the command): `--config`, `--no-default-config`, `--root DIR` (repeatable), `--split-root DIR`,
 `--index-dir DIR`, `--listen ADDR`, `--exclude PATTERN`, `--max-memory-mb N`.
 
 All output is JSON: `{"ok": true, "result": {...}}` with `backend` (`index`, `scan`, `none`),
@@ -189,15 +195,27 @@ per-unit `units` status and `elapsed_ms`. Errors: `{"ok": false, "error": "..."}
 
 ## HTTP and JSON-RPC API
 
-`GET /status`, `GET /search`, `GET /files`, and `POST /rpc` (a JSON-RPC 2.0 message). The same
-methods (`search`, `files`, `status`, `reindex`) are available over `unumsearch rpc`.
+`GET /status`, `GET /search`, `GET /files`, `GET /lookup`, and `POST /rpc` (a JSON-RPC 2.0
+message). The same methods (`search`, `files`, `lookup`, `status`, `reindex`) are available over
+`unumsearch rpc`.
 
 `search` parameters: `pattern` (required), `root`, `mode` (`literal` default, or `regex`),
 `ignore_case`/`ci`, `glob` (comma-separated or repeated), `files_only`, `candidates_only`,
-`max_matches`, `max_files`, `scan_fallback`. `files`: `root`, `glob`, `regex`, `max_files`.
+`max_matches`, `max_files`, `scan_fallback`, `all_roots` (or `root=*`: every configured root in
+one call; the answer adds a per-root `roots` summary). `files`: `root`, `glob`, `regex`,
+`max_files`.
+
+`lookup` answers "which files contain each of these patterns?" for many patterns in one call:
+`patterns` (JSON array, or newline-separated over `GET`), `root` or `all_roots`, `mode`
+(`literal` default), `ignore_case`, `glob`, `max_files` per pattern (default 100). The result has
+one entry per pattern (`pattern`, `found`, `files`, `covered`, `fresh`, `truncated`). It runs
+inside the daemon, so it avoids per-request overhead and contention from many parallel calls.
 
 ```bash
 curl 'http://127.0.0.1:7781/search?root=/src/repo&pattern=TODO&glob=*.rs&files_only=1'
+curl 'http://127.0.0.1:7781/search?all_roots=1&pattern=parse_config&files_only=1'
+curl -s -X POST http://127.0.0.1:7781/rpc \
+  -d '{"jsonrpc":"2.0","id":1,"method":"lookup","params":{"patterns":["FooBar","baz_qux"],"all_roots":true}}'
 echo '{"jsonrpc":"2.0","id":1,"method":"search","params":{"pattern":"TODO","root":"/src/repo"}}' | unumsearch rpc
 ```
 

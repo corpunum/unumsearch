@@ -10,7 +10,8 @@ unumsearch files . -g '*.proto'
 unumsearch search -F 'BEGIN PRIVATE KEY' . | jq -r '.result.files[]'
 ```
 
-Exit status: 0 on success (also when nothing matches: check `.result.files`), 2 on error.
+Exit status: JSON output exits 0 on success (also when nothing matches: check
+`.result.files`); `--text` exits 1 when nothing matches, like grep; errors exit 2.
 
 ## GitHub Actions
 
@@ -25,5 +26,5 @@ Exit status: 0 on success (also when nothing matches: check `.result.files`), 2 
     test "$n" -eq 0
 ```
 
-Pin a version with `UNUMSEARCH_VERSION=v0.1.1` for reproducible builds. On Windows runners use
+Pin a version with `UNUMSEARCH_VERSION=v0.1.2` for reproducible builds. On Windows runners use
 `install.ps1` (see the main README).

@@ -20,7 +20,7 @@ Most clients use the `mcpServers` JSON shape:
 
 | Tool | Arguments | Notes |
 | --- | --- | --- |
-| `search` | `pattern` (required), `path`, `regex`, `ignore_case`, `glob` (array), `files_only`, `max_matches` | literal unless `regex: true`; result JSON includes `fresh`, `backend`, `truncated` |
+| `search` | `pattern` (required), `path`, `regex`, `ignore_case`, `glob` (array), `files_only`, `max_matches`, `all_roots` | literal unless `regex: true`; result JSON includes `fresh`, `backend`, `truncated` |
 | `find_files` | `path`, `glob` (array), `regex`, `max_files` | filename search |
 | `index_status` | none | units, file counts, freshness |
 

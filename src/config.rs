@@ -245,11 +245,21 @@ impl Config {
     /// Load from `path` (or $UNUMSEARCH_CONFIG, or the platform default if it
     /// exists), then apply environment overrides.
     pub fn load(path: Option<&Path>) -> Result<Config, String> {
+        Self::load_with(path, true)
+    }
+
+    /// Like [`Config::load`]; with `use_default` false the platform default
+    /// config file is never read (an explicit `path` or $UNUMSEARCH_CONFIG
+    /// still is).
+    pub fn load_with(path: Option<&Path>, use_default: bool) -> Result<Config, String> {
         let env_path = std::env::var_os("UNUMSEARCH_CONFIG").map(PathBuf::from);
-        let chosen = path
-            .map(Path::to_path_buf)
-            .or(env_path)
-            .or_else(|| Self::default_path().filter(|p| p.exists()));
+        let chosen = path.map(Path::to_path_buf).or(env_path).or_else(|| {
+            if use_default {
+                Self::default_path().filter(|p| p.exists())
+            } else {
+                None
+            }
+        });
         let mut cfg = match chosen {
             Some(p) => {
                 let text = std::fs::read_to_string(&p)

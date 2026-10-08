@@ -95,7 +95,7 @@ pub fn serve(engine: Arc<Engine>) {
                 continue;
             }
             let method = path.trim_start_matches('/');
-            if !matches!(method, "status" | "search" | "files") {
+            if !matches!(method, "status" | "search" | "files" | "lookup") {
                 respond(req, 404, &json!({"ok": false, "error": "not found"}));
                 continue;
             }

@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //! One request surface shared by every front-end (HTTP, stdio JSON-RPC, MCP).
 
-use crate::engine::{Engine, FilesOpts, SearchOpts};
+use crate::engine::{Engine, FilesOpts, SearchOpts, SearchResult};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::Instant;
 
 fn s(v: &Value, k: &str) -> Option<String> {
     v.get(k).and_then(|x| x.as_str()).map(str::to_string)
@@ -80,12 +82,190 @@ pub fn files_opts(engine: &Engine, p: &Value) -> FilesOpts {
     }
 }
 
+/// `all_roots=1` (or `root=*`): the query runs over every configured root.
+fn wants_all_roots(p: &Value) -> bool {
+    b(p, "all_roots", false) || s(p, "root").as_deref() == Some("*")
+}
+
+/// Every configured root, minus roots nested inside another listed root
+/// (their files are already covered by the outer one).
+pub fn all_roots(engine: &Engine) -> Vec<PathBuf> {
+    let mut roots = engine.cfg.root_paths();
+    roots.sort();
+    roots.dedup();
+    let outer = roots.clone();
+    roots.retain(|r| !outer.iter().any(|o| o != r && r.starts_with(o)));
+    roots
+}
+
+fn backend_rank(b: &str) -> u8 {
+    match b {
+        "index" => 0,
+        "scan" => 1,
+        _ => 2,
+    }
+}
+
+/// Run one search per configured root and merge the answers: files and
+/// matches concatenated (deduplicated by path), `covered`/`fresh` only when
+/// every root's answer is, `truncated` when any is or the merged caps are hit.
+pub fn search_all_roots(engine: &Engine, o: &SearchOpts) -> Result<Value, String> {
+    let t0 = Instant::now();
+    let mut merged = SearchResult {
+        backend: "index",
+        covered: true,
+        fresh: true,
+        files: vec![],
+        matches: vec![],
+        candidates: 0,
+        truncated: false,
+        units: vec![],
+        elapsed_ms: 0.0,
+    };
+    let mut seen_files: HashSet<String> = HashSet::new();
+    let mut seen_matches: HashSet<(String, u64)> = HashSet::new();
+    let mut per_root = Vec::new();
+    for root in all_roots(engine) {
+        let mut ro = o.clone();
+        ro.root = root.clone();
+        let r = engine.search(&ro)?;
+        per_root.push(json!({
+            "root": root.to_string_lossy(),
+            "backend": r.backend,
+            "covered": r.covered,
+            "fresh": r.fresh,
+            "files": r.files.len(),
+            "truncated": r.truncated,
+        }));
+        if backend_rank(r.backend) > backend_rank(merged.backend) {
+            merged.backend = r.backend;
+        }
+        merged.covered &= r.covered;
+        merged.fresh &= r.fresh;
+        merged.truncated |= r.truncated;
+        merged.candidates += r.candidates;
+        merged.units.extend(r.units);
+        for f in r.files {
+            if seen_files.insert(f.clone()) {
+                merged.files.push(f);
+            }
+        }
+        for m in r.matches {
+            if seen_matches.insert((m.path.clone(), m.line)) {
+                merged.matches.push(m);
+            }
+        }
+    }
+    if merged.files.len() > o.max_files {
+        merged.files.truncate(o.max_files);
+        merged.truncated = true;
+    }
+    if merged.matches.len() > o.max_matches {
+        merged.matches.truncate(o.max_matches);
+        merged.truncated = true;
+    }
+    merged.elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    let mut v = serde_json::to_value(&merged).map_err(|e| e.to_string())?;
+    v["roots"] = Value::Array(per_root);
+    Ok(json!({"ok": true, "result": v}))
+}
+
+fn patterns(p: &Value) -> Vec<String> {
+    match p.get("patterns") {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect(),
+        // Over HTTP GET: newline-separated (`patterns=a%0Ab`), since a
+        // literal may itself contain commas.
+        Some(Value::String(x)) => x
+            .split('\n')
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+        _ => vec![],
+    }
+}
+
+/// Batch existence lookup: which files contain each of many patterns
+/// (literal by default), under one root or every root, in one call.
+pub fn lookup(engine: &Engine, p: &Value) -> Result<Value, String> {
+    let t0 = Instant::now();
+    let pats = patterns(p);
+    if pats.is_empty() {
+        return Err("missing 'patterns' (array, or newline-separated string)".into());
+    }
+    if pats.len() > 10_000 {
+        return Err("too many patterns (max 10000)".into());
+    }
+    let mut base = search_opts(engine, &json!({"pattern": "x"}))?;
+    let mode = s(p, "mode").unwrap_or_else(|| "literal".into());
+    base.regex = mode == "regex" || b(p, "regex", false);
+    base.case_insensitive = b(p, "ignore_case", b(p, "ci", false));
+    base.globs = globs(p);
+    base.files_only = true;
+    base.max_files = n(p, "max_files", 100);
+    base.scan_fallback = b(p, "scan_fallback", true);
+    let roots = if wants_all_roots(p) {
+        all_roots(engine)
+    } else {
+        vec![s(p, "root")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| default_root(engine))]
+    };
+    let (mut covered, mut fresh) = (true, true);
+    let mut results = Vec::with_capacity(pats.len());
+    for pat in pats {
+        let mut files: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let (mut pc, mut pf, mut pt) = (true, true, false);
+        for root in &roots {
+            let mut o = base.clone();
+            o.pattern = pat.clone();
+            o.root = root.clone();
+            let r = engine.search(&o)?;
+            pc &= r.covered;
+            pf &= r.fresh;
+            pt |= r.truncated;
+            for f in r.files {
+                if seen.insert(f.clone()) {
+                    files.push(f);
+                }
+            }
+        }
+        if files.len() > base.max_files {
+            files.truncate(base.max_files);
+            pt = true;
+        }
+        covered &= pc;
+        fresh &= pf;
+        results.push(json!({
+            "pattern": pat,
+            "found": !files.is_empty(),
+            "files": files,
+            "covered": pc,
+            "fresh": pf,
+            "truncated": pt,
+        }));
+    }
+    Ok(json!({"ok": true, "result": {
+        "results": results,
+        "roots": roots.iter().map(|r| r.to_string_lossy().into_owned()).collect::<Vec<_>>(),
+        "covered": covered,
+        "fresh": fresh,
+        "elapsed_ms": t0.elapsed().as_secs_f64() * 1000.0,
+    }}))
+}
+
 /// Dispatch a method by name. Errors are returned as strings; transports
 /// wrap them in their own error envelope.
 pub fn call(engine: &Engine, method: &str, params: &Value) -> Result<Value, String> {
     match method {
         "search" => {
             let o = search_opts(engine, params)?;
+            if wants_all_roots(params) {
+                return search_all_roots(engine, &o);
+            }
             let r = engine.search(&o)?;
             Ok(json!({"ok": true, "result": r}))
         }
@@ -94,6 +274,7 @@ pub fn call(engine: &Engine, method: &str, params: &Value) -> Result<Value, Stri
             let r = engine.files(&o)?;
             Ok(json!({"ok": true, "result": r}))
         }
+        "lookup" => lookup(engine, params),
         "status" => Ok(engine.status()),
         "reindex" => {
             if !engine.is_writer() {

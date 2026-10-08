@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.1.2 (2026-10-08)
+
+- **Search every root in one call:** `search` takes `all_roots=1` (or `root=*`; CLI
+  `--all-roots`; MCP `all_roots`) and merges the per-root answers, with a per-root `roots`
+  summary. Additive.
+- **Batch lookup:** new `lookup` method (`GET /lookup`, JSON-RPC `lookup`) answers which files
+  contain each of many patterns, under one root or all roots, in one call. Additive; requested by
+  the OpenLunum reference locator, where one-by-one requests cost hundreds of ms per record and
+  parallel requests contended.
+- **Explicit roots no longer merge the default config:** `--root`/`--split-root` without
+  `--config`/`$UNUMSEARCH_CONFIG` ignore the platform default config file (previously its roots
+  were silently merged in, so a private index could grow to cover every default root). New
+  `--no-default-config` skips that file in every case. With `--config FILE`, `--root` still adds
+  to the file's roots.
+
 ## v0.1.1 (2026-10-08)
 
 - **Security fix:** files created or changed after a unit's last build were

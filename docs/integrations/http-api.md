@@ -47,6 +47,20 @@ unumsearch_tool = FunctionTool.from_defaults(fn=unumsearch)
 Frameworks with MCP adapters (for example `langchain-mcp-adapters`) can instead launch
 `unumsearch mcp` directly; see [generic-mcp.md](generic-mcp.md).
 
+## Many lookups at once
+
+To ground many references (identifiers, file names, literals) across every indexed root, send
+them in one `lookup` call instead of one request each; it runs inside the daemon and returns one
+entry per pattern:
+
+```bash
+curl -s -X POST http://127.0.0.1:7781/rpc -d '{"jsonrpc":"2.0","id":1,"method":"lookup",
+  "params":{"patterns":["parse_config","FooBar"],"all_roots":true,"max_files":5}}'
+# GET form: /lookup?all_roots=1&patterns=parse_config%0AFooBar
+```
+
+`search` also takes `all_roots=1` to search every configured root in one call.
+
 ## JSON-RPC
 
 ```bash

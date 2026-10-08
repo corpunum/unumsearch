@@ -28,6 +28,7 @@ COMMANDS:
       --candidates                return unverified index candidates
       --no-scan                   do not scan roots the index does not cover
       --text                      ripgrep-style text output instead of JSON
+      --all-roots                 search every configured root (PATH ignored)
   files [PATH]                    list indexed files
       -g, --glob GLOB             glob filter (repeatable)
       --regex RE                  regex on relative path or basename
@@ -42,7 +43,9 @@ COMMANDS:
 GLOBAL:
   --config FILE                   TOML config (default: $UNUMSEARCH_CONFIG or
                                   <platform config dir>/unumsearch/config.toml)
-  --root DIR                      add an index root (repeatable)
+  --no-default-config             do not read the platform default config file
+  --root DIR                      index root (repeatable); without --config the
+                                  default config file's roots are NOT merged in
   --split-root DIR                add a root whose children are separate units
   --index-dir DIR                 index location
   --listen ADDR                   HTTP address for serve (default 127.0.0.1:7781)
@@ -71,6 +74,7 @@ fn print(v: &serde_json::Value) {
 fn main() {
     let mut p = lexopt::Parser::from_env();
     let mut config_path: Option<PathBuf> = None;
+    let mut no_default_config = false;
     let mut roots: Vec<String> = vec![];
     let mut splits: Vec<String> = vec![];
     let mut excludes: Vec<String> = vec![];
@@ -84,6 +88,7 @@ fn main() {
     while let Some(arg) = p.next().unwrap_or_else(|e| die(e)) {
         match arg {
             Long("config") => config_path = Some(p.value().unwrap_or_else(|e| die(e)).into()),
+            Long("no-default-config") => no_default_config = true,
             Long("root") => roots.push(
                 p.value()
                     .unwrap_or_else(|e| die(e))
@@ -150,7 +155,12 @@ fn main() {
         std::process::exit(2);
     };
 
-    let mut cfg = Config::load(config_path.as_deref()).unwrap_or_else(|e| die(e));
+    // An explicit --root/--split-root describes the whole corpus: the roots
+    // of the platform default config file are not merged in (an explicit
+    // --config or $UNUMSEARCH_CONFIG still is). --no-default-config skips the
+    // default file in every case.
+    let use_default = !no_default_config && roots.is_empty();
+    let mut cfg = Config::load_with(config_path.as_deref(), use_default).unwrap_or_else(|e| die(e));
     if !roots.is_empty() {
         cfg.roots.extend(roots);
     }
@@ -193,8 +203,10 @@ fn main() {
             };
             let mut pos: Vec<String> = vec![];
             let mut text = false;
+            let mut all = false;
             while let Some(a) = sp.next().unwrap_or_else(|e| die(e)) {
                 match a {
+                    Long("all-roots") => all = true,
                     Short('F') | Long("literal") => o.regex = false,
                     Short('i') | Long("ignore-case") => o.case_insensitive = true,
                     Short('s') | Long("case-sensitive") => o.case_insensitive = false,
@@ -242,6 +254,36 @@ fn main() {
                 None => std::env::current_dir().unwrap_or_default(),
             };
             let e = Engine::open(cfg, false).unwrap_or_else(|e| die(e));
+            if all {
+                match unumsearch::api::search_all_roots(&e, &o) {
+                    Ok(v) if text => {
+                        let r = &v["result"];
+                        if o.files_only || o.candidates_only {
+                            for f in r["files"].as_array().into_iter().flatten() {
+                                out(f.as_str().unwrap_or_default());
+                            }
+                        } else {
+                            for m in r["matches"].as_array().into_iter().flatten() {
+                                out(&format!(
+                                    "{}:{}:{}",
+                                    m["path"].as_str().unwrap_or_default(),
+                                    m["line"],
+                                    m["text"].as_str().unwrap_or_default()
+                                ));
+                            }
+                        }
+                        if r["files"].as_array().is_none_or(|a| a.is_empty()) {
+                            std::process::exit(1);
+                        }
+                    }
+                    Ok(v) => print(&v),
+                    Err(err) => {
+                        print(&json!({"ok": false, "error": err}));
+                        std::process::exit(2);
+                    }
+                }
+                return;
+            }
             match e.search(&o) {
                 Ok(r) if text => {
                     if o.files_only || o.candidates_only {
