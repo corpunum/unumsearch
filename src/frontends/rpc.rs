@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, Write};
 use unumsearch::{api, Engine};
 
-pub fn handle_line(engine: &Engine, line: &str) -> Option<Value> {
+pub fn handle_line(engine: &Engine, line: &str, scope: api::Scope) -> Option<Value> {
     let msg: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -18,7 +18,7 @@ pub fn handle_line(engine: &Engine, line: &str) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
-    let res = api::call(engine, method, &params);
+    let res = api::call_scoped(engine, method, &params, scope);
     let id = id?; // notifications get no reply
     Some(match res {
         Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),
@@ -41,7 +41,7 @@ pub fn run(engine: &Engine) {
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(reply) = handle_line(engine, &line) {
+        if let Some(reply) = handle_line(engine, &line, api::Scope::Local) {
             let _ = writeln!(out, "{reply}");
             let _ = out.flush();
         }

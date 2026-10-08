@@ -4,7 +4,7 @@
 use crate::engine::{Engine, FilesOpts, SearchOpts, SearchResult};
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 fn s(v: &Value, k: &str) -> Option<String> {
@@ -87,14 +87,13 @@ fn wants_all_roots(p: &Value) -> bool {
     b(p, "all_roots", false) || s(p, "root").as_deref() == Some("*")
 }
 
-/// Every configured root, minus roots nested inside another listed root
-/// (their files are already covered by the outer one).
+/// Every configured root. A root nested inside another is kept: the outer
+/// root's ignore files or excludes may hide files the nested root's own
+/// corpus contains. Results are de-duplicated by path when merged.
 pub fn all_roots(engine: &Engine) -> Vec<PathBuf> {
     let mut roots = engine.cfg.root_paths();
     roots.sort();
     roots.dedup();
-    let outer = roots.clone();
-    roots.retain(|r| !outer.iter().any(|o| o != r && r.starts_with(o)));
     roots
 }
 
@@ -257,9 +256,69 @@ pub fn lookup(engine: &Engine, p: &Value) -> Result<Value, String> {
     }}))
 }
 
+/// Who is asking. `Local` callers (CLI, stdio JSON-RPC, MCP) run as the user
+/// and may search any directory; `Confined` callers (the HTTP API) may only
+/// search inside the configured roots and get request limits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    Local,
+    Confined,
+}
+
+/// Limits applied to confined (HTTP) requests.
+pub const MAX_PATTERN_BYTES: usize = 16 * 1024;
+pub const MAX_RESULT_FILES: usize = 1_000_000;
+pub const MAX_RESULT_MATCHES: usize = 200_000;
+const MAX_GLOBS: usize = 64;
+
+/// Authorise the request's root and clamp its limits.
+fn guard(engine: &Engine, method: &str, params: &Value, scope: Scope) -> Result<Value, String> {
+    let mut p = params.clone();
+    if !matches!(method, "search" | "files" | "lookup" | "reindex") {
+        return Ok(p);
+    }
+    if let Some(r) = s(&p, "root") {
+        if r != "*" {
+            engine.authorize_root(Path::new(&r), scope == Scope::Confined)?;
+        }
+    }
+    if scope == Scope::Confined {
+        if s(&p, "pattern")
+            .or_else(|| s(&p, "q"))
+            .is_some_and(|x| x.len() > MAX_PATTERN_BYTES)
+            || s(&p, "regex").is_some_and(|x| x.len() > MAX_PATTERN_BYTES)
+        {
+            return Err("pattern too long".into());
+        }
+        if globs(&p).len() > MAX_GLOBS {
+            return Err("too many globs".into());
+        }
+        for (k, cap) in [
+            ("max_files", MAX_RESULT_FILES),
+            ("max_matches", MAX_RESULT_MATCHES),
+        ] {
+            if params.get(k).is_some() {
+                p[k] = Value::from(n(params, k, cap).min(cap) as u64);
+            }
+        }
+    }
+    Ok(p)
+}
+
+/// [`call_scoped`] with [`Scope::Local`].
+pub fn call(engine: &Engine, method: &str, params: &Value) -> Result<Value, String> {
+    call_scoped(engine, method, params, Scope::Local)
+}
+
 /// Dispatch a method by name. Errors are returned as strings; transports
 /// wrap them in their own error envelope.
-pub fn call(engine: &Engine, method: &str, params: &Value) -> Result<Value, String> {
+pub fn call_scoped(
+    engine: &Engine,
+    method: &str,
+    params: &Value,
+    scope: Scope,
+) -> Result<Value, String> {
+    let params = &guard(engine, method, params, scope)?;
     match method {
         "search" => {
             let o = search_opts(engine, params)?;

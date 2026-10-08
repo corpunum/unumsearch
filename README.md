@@ -12,6 +12,14 @@ query. unumsearch reads a compact trigram index instead and only opens the files
 then verifies them against the real file contents, so answers are exact and usually take a few
 milliseconds.
 
+> **Use the daemon for speed.** The fast path is the running daemon (or the MCP server / `rpc`
+> process, which keep the index open): queries take about 1 ms at the median. A *new CLI process
+> per query* pays process start and index open each time (about 21 ms p50 in the benchmark
+> below) and is **slower than `rg` at the median on trees `rg` can scan quickly** (rg 6.9 ms p50
+> versus 21 ms). The index wins on tail latency (p95 30-40 ms vs 388 ms) and on big trees, not on
+> one-off CLI calls over small directories. See [RELIABILITY.md](RELIABILITY.md) for what is
+> guaranteed and how it is tested.
+
 ## Features
 
 - **Content search**: regex (Rust/ripgrep syntax) or literal, case-sensitive or not, with
@@ -55,11 +63,11 @@ curl -fsSL https://github.com/corpunum/unumsearch/releases/latest/download/insta
 irm https://github.com/corpunum/unumsearch/releases/latest/download/install.ps1 | iex
 ```
 
-`UNUMSEARCH_VERSION=v0.1.2` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
+`UNUMSEARCH_VERSION=v0.1.3` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
 Every archive and `SHA256SUMS` also carry a GitHub build-provenance attestation:
 
 ```bash
-gh attestation verify unumsearch-v0.1.2-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
+gh attestation verify unumsearch-v0.1.3-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
 ```
 
 Each archive contains the binary, this README, the license, `config.example.toml`, the Agent
@@ -68,7 +76,7 @@ Skill (`skills/`) and the systemd unit (`packaging/`).
 From source (Rust 1.89 or newer):
 
 ```bash
-cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.2
+cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.3
 # or
 git clone https://github.com/corpunum/unumsearch && cd unumsearch
 cargo build --release            # target/release/unumsearch
@@ -104,7 +112,7 @@ on macOS, `%APPDATA%\unumsearch\config.toml` on Windows). Environment variables
 
 **Explicit roots replace the default config.** `--root`/`--split-root` without `--config` (or
 `$UNUMSEARCH_CONFIG`) do not read the platform default config file, so a private index built
-with `--root DIR --index-dir DIR` covers exactly `DIR`. (Before v0.1.2 the default file's roots
+with `--root DIR --index-dir DIR` covers exactly `DIR`. (Before v0.1.3 the default file's roots
 were merged in.) `--no-default-config` skips the default file in every case; with an explicit
 `--config FILE`, `--root` adds to that file's roots.
 
@@ -328,7 +336,9 @@ they are a yardstick, not a tuned comparison.
 - Matching is line-oriented like ripgrep without `-U`; multi-line patterns are not supported.
 - Case-insensitive matching of non-ASCII text works but gets less help from the index (non-ASCII
   trigrams are not case-folded), so it reads more candidate files.
-- The HTTP API binds to loopback by default and has no authentication: do not expose it.
+- The HTTP API binds to loopback by default. It only answers for directories inside the
+  configured roots, refuses secret locations and foreign `Host` headers, and caps request sizes
+  (see [Security](#security)); it is still not designed to be exposed to untrusted networks.
 
 ## FAQ
 
@@ -362,6 +372,21 @@ small directory, `rg` is just as fast and needs no index.
 
 **Is it on crates.io?** Not yet; install from the release binaries or with
 `cargo install --git`.
+
+## Security
+
+- **Roots are authorised.** Over HTTP (and JSON-RPC over HTTP) the `root` of a request must lie
+  inside a configured root after resolving symlinks and `..`; anything else is refused with an
+  error, so the daemon cannot be used to scan arbitrary readable directories. The CLI, stdio
+  JSON-RPC and MCP run as the calling user and may still search other directories.
+- **Secret locations are refused wherever a walk starts.** `.ssh`, `.gnupg`, `.aws`, `.config`,
+  `.kube`, ... are checked on the absolute path (below the configured root that contains it), so
+  `root=~/.ssh` is denied for every front-end and scan fallback, not only skipped during a walk
+  from a parent.
+- **Loopback only unless authenticated.** `serve` refuses to bind a non-loopback address unless
+  `auth_token` (config) or `UNUMSEARCH_TOKEN` is set; with a token, requests need
+  `Authorization: Bearer TOKEN` or `X-Unumsearch-Token`. `Host` must be a loopback name (DNS
+  rebinding), request bodies are capped at 1 MiB and result counts and pattern sizes are clamped.
 
 ## License
 

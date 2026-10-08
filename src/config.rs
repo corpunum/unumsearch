@@ -170,6 +170,9 @@ pub struct Config {
     pub max_memory_mb: u64,
     /// HTTP listen address for `serve`.
     pub listen: String,
+    /// Shared secret for the HTTP API (`Authorization: Bearer TOKEN` or
+    /// `X-Unumsearch-Token`). Required to listen on a non-loopback address.
+    pub auth_token: Option<String>,
     /// Quiet period after a change before a unit is rebuilt.
     pub debounce_ms: u64,
     /// Upper bound on how long a continuously-changing unit waits.
@@ -195,6 +198,7 @@ impl Default for Config {
             max_file_size: 1 << 20,
             max_memory_mb: 96,
             listen: "127.0.0.1:7781".into(),
+            auth_token: None,
             debounce_ms: 500,
             max_wait_ms: 10_000,
             rescan_secs: 300,
@@ -291,6 +295,9 @@ impl Config {
         if let Some(v) = var("UNUMSEARCH_LISTEN") {
             self.listen = v;
         }
+        if let Some(v) = var("UNUMSEARCH_TOKEN") {
+            self.auth_token = Some(v);
+        }
         if let Some(v) = var("UNUMSEARCH_MAX_MEMORY_MB").and_then(|v| v.parse().ok()) {
             self.max_memory_mb = v;
         }
@@ -322,6 +329,19 @@ impl Config {
             .collect()
     }
 
+    /// Does `listen` bind only a loopback address?
+    pub fn listen_is_loopback(&self) -> bool {
+        let host = match self.listen.rsplit_once(':') {
+            Some((h, _)) => h.trim_start_matches('[').trim_end_matches(']'),
+            None => self.listen.as_str(),
+        };
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false)
+    }
+
     pub fn thread_count(&self) -> usize {
         if self.threads > 0 {
             return self.threads;
@@ -341,4 +361,25 @@ impl Config {
         v.extend(self.excludes.iter().cloned());
         v
     }
+}
+
+/// Matches single path components against the secret patterns (directory
+/// names such as `.ssh`, `.aws`, `.config`, and file-like names), so a path
+/// can be refused wherever the walk starts.
+pub fn secret_components() -> &'static globset::GlobSet {
+    static SET: std::sync::OnceLock<globset::GlobSet> = std::sync::OnceLock::new();
+    SET.get_or_init(|| {
+        let mut b = globset::GlobSetBuilder::new();
+        for pat in SECRET_EXCLUDES {
+            let pat = pat.trim_end_matches('/');
+            if let Ok(g) = globset::GlobBuilder::new(pat)
+                .case_insensitive(true)
+                .literal_separator(true)
+                .build()
+            {
+                b.add(g);
+            }
+        }
+        b.build().unwrap_or_else(|_| globset::GlobSet::empty())
+    })
 }

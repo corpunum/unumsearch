@@ -1,6 +1,6 @@
 [package]
 name = "unumsearch"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "Always-fresh local file and code search: trigram index, ripgrep-compatible corpus, CLI/daemon/JSON-RPC/MCP front-ends"
 license = "Apache-2.0"

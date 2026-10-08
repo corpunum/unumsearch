@@ -21,6 +21,7 @@ ap.add_argument("--url", default="http://127.0.0.1:7781")
 ap.add_argument("--rg", default="rg")
 ap.add_argument("--bin", default="unumsearch")
 ap.add_argument("--max-filesize", default="1M")
+ap.add_argument("--skip-rg", action="store_true", help="do not run ripgrep (timing of unumsearch only; no file-set comparison)")
 a = ap.parse_args()
 
 ignore = tempfile.NamedTemporaryFile("w", suffix=".ignore", delete=False)
@@ -54,10 +55,10 @@ def pct(xs, p):
 
 rows = []
 for root, q, g in json.load(open(a.queries)):
-    r_ms, r_files = med(lambda: rg(root, q, g))
+    r_ms, r_files = (0.0, None) if a.skip_rg else med(lambda: rg(root, q, g))
     h_ms, h_files = med(lambda: http(root, q, g))
     c_ms, _ = med(lambda: cli(root, q, g))
-    rows.append({"pattern": q, "rg_ms": r_ms, "http_ms": h_ms, "cli_ms": c_ms, "files": len(r_files), "equal": r_files == h_files})
+    rows.append({"pattern": q, "rg_ms": r_ms, "http_ms": h_ms, "cli_ms": c_ms, "files": len(h_files) if a.skip_rg else len(r_files), "equal": True if a.skip_rg else r_files == h_files})
     print(json.dumps(rows[-1]))
 for k in ("rg_ms", "http_ms", "cli_ms"):
     xs = [r[k] for r in rows]

@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub fn now_ms() -> u64 {
@@ -54,6 +54,12 @@ pub struct UnitState {
     pub pending_unknown: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Consecutive failed rebuilds (drives the retry back-off).
+    #[serde(skip)]
+    pub failures: u32,
+    /// Do not retry a failed rebuild before this time.
+    #[serde(skip)]
+    pub retry_at_ms: u64,
 }
 
 /// What a filesystem event changed in a unit.
@@ -108,11 +114,19 @@ pub struct Engine {
     build_lock: Mutex<()>,
     writer: bool,
     _lock: Option<File>,
-    manifest_stamp: Mutex<Option<SystemTime>>,
+    manifest_stamp: Mutex<Option<(SystemTime, u64, u64)>>,
     pub(crate) watched_dirs: Mutex<HashSet<PathBuf>>,
     pub(crate) need_unit_scan: AtomicBool,
     doc_sets: Mutex<HashMap<String, Arc<HashSet<String>>>>,
+    /// Last shard generation handed out (strictly increasing).
+    last_gen: AtomicU64,
+    /// Configured roots in both spellings (as written, canonical).
+    anchors: OnceLock<Vec<(PathBuf, PathBuf)>>,
 }
+
+/// Test hook: make shard writes fail (simulates a full or failing disk).
+#[doc(hidden)]
+pub static FAIL_SHARD_WRITES: AtomicBool = AtomicBool::new(false);
 
 fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
@@ -193,6 +207,18 @@ pub struct FilesOpts {
     pub scan_fallback: bool,
 }
 
+impl Default for FilesOpts {
+    fn default() -> Self {
+        FilesOpts {
+            root: PathBuf::from("."),
+            globs: vec![],
+            regex: None,
+            max_files: 5000,
+            scan_fallback: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct FilesResult {
     pub backend: &'static str,
@@ -241,6 +267,8 @@ impl Engine {
             watched_dirs: Mutex::new(HashSet::new()),
             need_unit_scan: AtomicBool::new(false),
             doc_sets: Mutex::new(HashMap::new()),
+            last_gen: AtomicU64::new(now_ms()),
+            anchors: OnceLock::new(),
         };
         e.reload_manifest(true);
         if e.writer {
@@ -254,6 +282,86 @@ impl Engine {
             }
         }
         Ok(e)
+    }
+
+    /// A changed file the overlay may serve: a regular file (never a
+    /// symlink, which could point outside the corpus) within the size cap.
+    fn overlay_file_ok(&self, abs: &Path) -> bool {
+        std::fs::symlink_metadata(abs)
+            .map(|m| m.is_file() && m.len() <= self.cfg.max_file_size)
+            .unwrap_or(false)
+    }
+
+    /// Configured roots and split roots, as written and canonicalised.
+    fn anchors(&self) -> &[(PathBuf, PathBuf)] {
+        self.anchors.get_or_init(|| {
+            let mut v = Vec::new();
+            for r in self
+                .cfg
+                .root_paths()
+                .into_iter()
+                .chain(self.cfg.split_paths())
+            {
+                let canon = std::fs::canonicalize(&r).unwrap_or_else(|_| r.clone());
+                v.push((r, canon));
+            }
+            v
+        })
+    }
+
+    /// Is any part of `root` (below the configured root that contains it, or
+    /// the whole path when none does) a secret location such as `.ssh` or
+    /// `.config`? Exclusions are about the absolute location, so starting a
+    /// walk inside an excluded directory does not escape them.
+    pub fn secret_blocked(&self, root: &Path) -> bool {
+        let set = crate::config::secret_components();
+        let canon = std::fs::canonicalize(root).ok();
+        for p in std::iter::once(root.to_path_buf()).chain(canon) {
+            let below = self
+                .anchors()
+                .iter()
+                .filter_map(|(a, c)| p.strip_prefix(a).or_else(|_| p.strip_prefix(c)).ok())
+                .min_by_key(|r| r.components().count())
+                .unwrap_or(p.as_path());
+            for c in below.components() {
+                if let std::path::Component::Normal(n) = c {
+                    if set.is_match(n) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Check a requested search root. Secret locations are always refused.
+    /// With `confined` (the HTTP API), the root must also lie inside a
+    /// configured root once symlinks and `..` are resolved - however the
+    /// path is spelled.
+    pub fn authorize_root(&self, root: &Path, confined: bool) -> Result<(), String> {
+        let lexical = crate::config::normalize(root);
+        if self.secret_blocked(&lexical) || self.secret_blocked(root) {
+            return Err("path is excluded (secret location)".into());
+        }
+        if !confined {
+            return Ok(());
+        }
+        let inside = |p: &Path| self.anchors().iter().any(|(_, c)| p.starts_with(c));
+        let raw = if root.is_absolute() {
+            root.to_path_buf()
+        } else {
+            std::env::current_dir().unwrap_or_default().join(root)
+        };
+        let denied = || Err("root is not inside a configured root".to_string());
+        // Both the literal spelling (symlinks and `..` resolved by the OS)
+        // and the lexically normalised one must resolve inside.
+        for p in [raw, lexical] {
+            match std::fs::canonicalize(&p) {
+                Ok(c) if inside(&c) => {}
+                _ => return denied(),
+            }
+        }
+        Ok(())
     }
 
     pub fn is_writer(&self) -> bool {
@@ -277,7 +385,13 @@ impl Engine {
 
     fn reload_manifest(&self, force: bool) {
         let p = self.manifest_path();
-        let stamp = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+        let stamp = std::fs::metadata(&p).ok().and_then(|m| {
+            #[cfg(unix)]
+            let ino = std::os::unix::fs::MetadataExt::ino(&m);
+            #[cfg(not(unix))]
+            let ino = 0;
+            Some((m.modified().ok()?, m.len(), ino))
+        });
         {
             let mut s = self.manifest_stamp.lock().unwrap();
             if !force && *s == stamp {
@@ -474,7 +588,7 @@ impl Engine {
                     .get(unit)
                     .map(|v| {
                         v.iter()
-                            .flat_map(|s| s.docs.iter().map(|d| d.rel.clone()))
+                            .flat_map(|s| s.docs().map(|d| d.rel.to_string()))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -536,6 +650,7 @@ impl Engine {
             .values()
             .filter(|u| {
                 u.dirty
+                    && t >= u.retry_at_ms
                     && (t.saturating_sub(u.last_event_ms) >= self.cfg.debounce_ms
                         || t.saturating_sub(u.dirty_since_ms) >= self.cfg.max_wait_ms)
             })
@@ -552,16 +667,45 @@ impl Engine {
         let _guard = self.build_lock.lock().unwrap();
         let prev_fp;
         let prev_shards;
+        // What was pending when this build began: restored if it fails.
+        let taken_pending;
         {
             let mut g = self.inner.write().unwrap();
             let u = g.m.units.get_mut(unit)?;
             // Cleared before listing: events during the build re-mark it.
             u.dirty = false;
-            u.pending.clear();
+            taken_pending = std::mem::take(&mut u.pending);
             u.pending_unknown = false;
             prev_fp = u.fingerprint;
             prev_shards = u.shards.clone();
         }
+        // A failed rebuild keeps the old index, keeps every change that was
+        // pending, and marks the unit not fresh until a later build succeeds.
+        let fail = |why: String, written: &[String]| -> Option<Vec<FileEntry>> {
+            for n in written {
+                let _ = std::fs::remove_file(self.dir.join(n));
+            }
+            let t = now_ms();
+            {
+                let mut g = self.inner.write().unwrap();
+                if let Some(u) = g.m.units.get_mut(unit) {
+                    u.error = Some(why);
+                    u.dirty = true;
+                    if u.dirty_since_ms == 0 {
+                        u.dirty_since_ms = t;
+                    }
+                    u.last_event_ms = t;
+                    u.pending.extend(taken_pending.iter().cloned());
+                    // The new listing was never indexed: unknown changes.
+                    u.pending_unknown = true;
+                    u.failures = u.failures.saturating_add(1);
+                    let backoff = 1000u64 << u.failures.min(6);
+                    u.retry_at_ms = t + backoff.min(60_000);
+                }
+            }
+            self.save_manifest();
+            None
+        };
         let t0 = Instant::now();
         let root = PathBuf::from(unit);
         let files = walk::list(&self.cfg, &root);
@@ -573,6 +717,7 @@ impl Engine {
                 u.ready = true;
                 u.indexed_at_ms = now_ms();
                 u.error = None;
+                u.failures = 0;
             }
             return Some(files);
         }
@@ -580,7 +725,7 @@ impl Engine {
         let budget = (self.cfg.max_memory_mb.max(16) as usize) << 20;
         // Postings are roughly a third of the builder's footprint at flush time.
         let flush_at = budget / 3;
-        let gen = now_ms();
+        let gen = self.next_generation();
         let prefix = unit_prefix(unit);
         let mut names = Vec::new();
         let mut b = ShardBuilder::new();
@@ -625,18 +770,13 @@ impl Engine {
             }
         }
         if let Some(e) = err {
-            for n in &names {
-                let _ = std::fs::remove_file(self.dir.join(n));
-            }
-            if let Some(u) = self.inner.write().unwrap().m.units.get_mut(unit) {
-                u.error = Some(e);
-            }
-            return None;
+            return fail(e, &names);
         }
         let mut opened = Vec::new();
         for n in &names {
-            if let Ok(s) = Shard::open(&self.dir.join(n)) {
-                opened.push(s);
+            match Shard::open(&self.dir.join(n)) {
+                Ok(s) => opened.push(s),
+                Err(e) => return fail(format!("new shard {n} unreadable: {e}"), &names),
             }
         }
         self.doc_sets.lock().unwrap().remove(unit);
@@ -644,7 +784,7 @@ impl Engine {
             let mut g = self.inner.write().unwrap();
             g.shards.insert(unit.to_string(), Arc::new(opened));
             if let Some(u) = g.m.units.get_mut(unit) {
-                u.shards = names;
+                u.shards = names.clone();
                 u.fingerprint = fp;
                 u.files = docs;
                 u.bytes = total;
@@ -653,16 +793,43 @@ impl Engine {
                 u.build_ms = t0.elapsed().as_millis() as u64;
                 u.ready = true;
                 u.error = None;
+                u.failures = 0;
+                u.retry_at_ms = 0;
             }
         }
+        // The manifest that references the new shards is on disk before any
+        // old shard is removed, and a shard the manifest references is never
+        // removed (names are unique per build, but belt and braces).
         self.save_manifest();
         release_memory();
+        let keep: HashSet<&String> = names.iter().collect();
         for s in prev_shards {
+            if keep.contains(&s) {
+                continue;
+            }
             // Readers holding the old mmap keep the inode alive (POSIX); on
             // platforms that refuse, orphan cleanup at next start removes it.
             let _ = std::fs::remove_file(self.dir.join(s));
         }
         Some(files)
+    }
+
+    /// A shard generation number: strictly increasing within this process
+    /// and (being seeded from the clock) across restarts, so two builds of a
+    /// unit can never produce the same file name.
+    fn next_generation(&self) -> u64 {
+        let now = now_ms();
+        let mut cur = self.last_gen.load(Ordering::Relaxed);
+        loop {
+            let next = now.max(cur + 1);
+            match self
+                .last_gen
+                .compare_exchange(cur, next, Ordering::SeqCst, Ordering::Relaxed)
+            {
+                Ok(_) => return next,
+                Err(c) => cur = c,
+            }
+        }
     }
 
     /// Bring every unit up to date. Returns (unit, listing) pairs.
@@ -791,7 +958,7 @@ impl Engine {
                                     continue;
                                 }
                                 let abs = Path::new(u).join(rel);
-                                if abs.is_file() && Self::glob_ok(&ov, &abs) {
+                                if self.overlay_file_ok(&abs) && Self::glob_ok(&ov, &abs) {
                                     cands.push(abs);
                                 }
                             }
@@ -802,10 +969,10 @@ impl Engine {
                         for s in shards.iter() {
                             let ids: Box<dyn Iterator<Item = usize>> = match s.eval(&plan) {
                                 Some(v) => Box::new(v.into_iter().map(|x| x as usize)),
-                                None => Box::new(0..s.docs.len()),
+                                None => Box::new(0..s.ndocs()),
                             };
                             for id in ids {
-                                let d = &s.docs[id];
+                                let Some(d) = s.doc(id) else { continue };
                                 if !c.sub.is_empty()
                                     && d.rel != c.sub
                                     && !d.rel.starts_with(&(c.sub.clone() + "/"))
@@ -827,7 +994,7 @@ impl Engine {
 
         let (mut cands, backend) = if covered {
             (cands, "index")
-        } else if o.scan_fallback && root.is_dir() {
+        } else if o.scan_fallback && root.is_dir() && !self.secret_blocked(&root) {
             let files = walk::list(&self.cfg, &root);
             let c = files
                 .into_iter()
@@ -989,7 +1156,11 @@ impl Engine {
                     // New or changed files since the last build.
                     for rel in pending.into_iter().flatten() {
                         let abs = Path::new(u).join(rel);
-                        if in_sub(&c.sub, rel) && abs.is_file() && keep(&abs) {
+                        if in_sub(&c.sub, rel) && self.overlay_file_ok(&abs) && keep(&abs) {
+                            if files.len() >= o.max_files {
+                                truncated = true;
+                                break 'outer;
+                            }
                             files.push(path_str(&abs));
                         }
                     }
@@ -997,14 +1168,14 @@ impl Engine {
                         continue;
                     };
                     for s in shards.iter() {
-                        for d in &s.docs {
+                        for d in s.docs() {
                             if !in_sub(&c.sub, &d.rel) {
                                 continue;
                             }
-                            // Deleted since the build.
-                            if pending.is_some_and(|p| p.contains(&d.rel))
-                                && !Path::new(u).join(&d.rel).is_file()
-                            {
+                            // Changed since the build: the loop above already
+                            // listed it (if it still qualifies), so listing it
+                            // again would only use up `max_files` on a duplicate.
+                            if pending.is_some_and(|p| p.contains(d.rel)) {
                                 continue;
                             }
                             let abs = Path::new(u).join(&d.rel);
@@ -1020,7 +1191,7 @@ impl Engine {
                 }
                 ("index", true, st, fresh)
             }
-            None if o.scan_fallback && root.is_dir() => {
+            None if o.scan_fallback && root.is_dir() && !self.secret_blocked(&root) => {
                 for f in walk::list(&self.cfg, &root) {
                     let abs = root.join(&f.rel);
                     if keep(&abs) {

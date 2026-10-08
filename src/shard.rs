@@ -99,6 +99,9 @@ impl ShardBuilder {
     }
 
     pub fn write(self, path: &Path) -> std::io::Result<()> {
+        if crate::engine::FAIL_SHARD_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(std::io::Error::other("simulated disk write failure"));
+        }
         let mut tris: Vec<(&Tri, &Posting)> = self.post.iter().collect();
         tris.sort_unstable_by_key(|(t, _)| **t);
 
@@ -140,9 +143,19 @@ impl ShardBuilder {
     }
 }
 
+/// A document entry read in place from the mapped shard (no per-document
+/// heap allocation: the table stays in reclaimable page cache).
+#[derive(Clone, Copy, Debug)]
+pub struct DocRef<'a> {
+    pub rel: &'a str,
+    pub size: u64,
+    pub mtime_ns: i64,
+}
+
 pub struct Shard {
     map: Mmap,
-    pub docs: Vec<DocMeta>,
+    /// Byte offset of each document record inside the map.
+    doc_offs: Vec<u32>,
     ntri: usize,
     table_off: usize,
     post_off: usize,
@@ -176,36 +189,63 @@ impl Shard {
         if post_off + post_len != map.len() || table_len != ntri * 8 {
             return Err(bad());
         }
-        let mut docs = Vec::with_capacity(ndocs);
+        if ndocs > docs_len / 20 + 1 {
+            return Err(bad());
+        }
+        let mut doc_offs = Vec::with_capacity(ndocs);
         let mut o = HEADER;
         for _ in 0..ndocs {
             if o + 4 > table_off {
                 return Err(bad());
             }
             let n = u32_at(&map, o) as usize;
-            o += 4;
-            if o + n + 16 > table_off {
+            if o + 4 + n + 16 > table_off || std::str::from_utf8(&map[o + 4..o + 4 + n]).is_err() {
                 return Err(bad());
             }
-            let rel = String::from_utf8_lossy(&map[o..o + n]).into_owned();
-            o += n;
-            let size = u64_at(&map, o);
-            let mtime_ns = u64_at(&map, o + 8) as i64;
-            o += 16;
-            docs.push(DocMeta {
-                rel,
-                size,
-                mtime_ns,
-            });
+            doc_offs.push(o as u32);
+            o += 4 + n + 16;
+        }
+        if o != table_off {
+            return Err(bad());
+        }
+        // Validation touched every document record; give those pages back so
+        // a freshly opened index does not count as resident (they stay in the
+        // page cache and fault back in when a query needs them).
+        #[cfg(unix)]
+        {
+            // SAFETY: a read-only file-backed mapping; dropped pages are
+            // simply faulted in again from the file.
+            let _ = unsafe { map.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
         }
         Ok(Shard {
             map,
-            docs,
+            doc_offs,
             ntri,
             table_off,
             post_off,
             post_len,
         })
+    }
+
+    pub fn ndocs(&self) -> usize {
+        self.doc_offs.len()
+    }
+
+    /// The document with this id, or `None` if the id is out of range.
+    pub fn doc(&self, id: usize) -> Option<DocRef<'_>> {
+        let o = *self.doc_offs.get(id)? as usize;
+        let n = u32_at(&self.map, o) as usize;
+        let rel = std::str::from_utf8(&self.map[o + 4..o + 4 + n]).ok()?;
+        let e = o + 4 + n;
+        Some(DocRef {
+            rel,
+            size: u64_at(&self.map, e),
+            mtime_ns: u64_at(&self.map, e + 8) as i64,
+        })
+    }
+
+    pub fn docs(&self) -> impl Iterator<Item = DocRef<'_>> + '_ {
+        (0..self.ndocs()).filter_map(move |i| self.doc(i))
     }
 
     pub fn disk_bytes(&self) -> usize {
@@ -228,6 +268,9 @@ impl Shard {
                 } else {
                     self.post_len
                 };
+                if start > end || end > self.post_len {
+                    return None;
+                }
                 return Some(&self.map[self.post_off + start..self.post_off + end]);
             }
         }
@@ -359,7 +402,7 @@ mod tests {
         let p = dir.path().join("s.shard");
         b.write(&p).unwrap();
         let s = Shard::open(&p).unwrap();
-        assert_eq!(s.docs.len(), 4);
+        assert_eq!(s.ndocs(), 4);
         let plan = trigram::plan("hello", true).unwrap();
         assert_eq!(s.eval(&plan), Some(vec![0, 1, 3]));
         let plan = trigram::plan("world|there", false).unwrap();
