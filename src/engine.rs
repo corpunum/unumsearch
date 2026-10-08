@@ -979,7 +979,7 @@ impl Engine {
                                 {
                                     continue;
                                 }
-                                let abs = Path::new(u).join(&d.rel);
+                                let abs = Path::new(u).join(d.rel);
                                 if Self::glob_ok(&ov, &abs) {
                                     cands.push(abs);
                                 }
@@ -1169,7 +1169,7 @@ impl Engine {
                     };
                     for s in shards.iter() {
                         for d in s.docs() {
-                            if !in_sub(&c.sub, &d.rel) {
+                            if !in_sub(&c.sub, d.rel) {
                                 continue;
                             }
                             // Changed since the build: the loop above already
@@ -1178,7 +1178,7 @@ impl Engine {
                             if pending.is_some_and(|p| p.contains(d.rel)) {
                                 continue;
                             }
-                            let abs = Path::new(u).join(&d.rel);
+                            let abs = Path::new(u).join(d.rel);
                             if keep(&abs) {
                                 if files.len() >= o.max_files {
                                     truncated = true;
