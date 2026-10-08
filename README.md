@@ -1,0 +1,238 @@
+# unumsearch
+
+Fast, always-fresh, indexed file and code search for local directories, written in Rust.
+One engine with several thin front-ends: a **library**, a **CLI** with stable JSON output, a
+**daemon** (local HTTP/JSON API and stdio JSON-RPC), an **MCP server**, and an **Agent Skill**.
+No GPU, model or network dependencies; nothing in it is specific to any one agent, framework or
+operating system.
+
+It was built for AI coding agents that grep large trees all day: dozens of checkouts of the same
+monorepo, agent workspaces, a few big repos. A plain `rg` over such a tree reads gigabytes per
+query. unumsearch reads a compact trigram index instead and only opens the files that can match,
+then verifies them against the real file contents, so answers are exact and usually take a few
+milliseconds.
+
+## Features
+
+- **Content search**: regex (Rust/ripgrep syntax) or literal, case-sensitive or not, with
+  ripgrep-style globs (`-g '*.rs' -g '!tests/**'`). Results are verified line by line against the
+  files on disk; the index only narrows which files are read.
+- **Filename search**: globs and/or a regex on the relative path or basename.
+- **ripgrep-compatible corpus**: the file set is defined with ripgrep's own walker (the `ignore`
+  crate): `.gitignore`/`.ignore` respected, hidden files included, binary files (NUL byte) and
+  files above a size cap skipped, plus configurable gitignore-syntax excludes. Equivalence with
+  `rg -l` is part of the test suite.
+- **Secrets-safe by default**: `.ssh/`, `.gnupg/`, `.aws/`, `.env*`, `*.key`, `*.pem`,
+  `id_rsa*`, `secrets.json`, `.netrc`, `.npmrc`, credentials files and more are never indexed,
+  regardless of configuration. Build output, dependency trees, media and archives are excluded
+  by default (overridable).
+- **Always fresh**: a filesystem watcher (`notify`: inotify, FSEvents, ReadDirectoryChangesW)
+  marks changed files immediately; they are searched directly until the background rebuild of
+  their unit lands (typically well under a second). A periodic rescan with a size/mtime
+  fingerprint catches anything the watcher missed. Every answer says whether it is `fresh`.
+- **Bounded resources**: a configurable build-memory budget, mmapped read-only shards (index
+  pages are reclaimable page cache, not heap), compact on-disk format (delta/varint postings with
+  an 8-bit next-byte mask per posting that removes most false-positive candidates).
+- **Units**: each root is indexed as a unit; a *split root* (a folder of many checkouts) makes
+  each child its own unit, so a change rebuilds one checkout, not all of them.
+- **One writer, many readers**: a lock file elects one writer per index directory; CLI
+  invocations and MCP servers open the same index read-only and reload it when it changes.
+- **Graceful fallbacks**: a directory the index does not cover is scanned directly with the same
+  corpus rules (`"backend": "scan"`), unless you ask for `--no-scan`.
+
+## Install
+
+```bash
+cargo install --git https://github.com/corpunum/unumsearch
+# or build from source
+git clone https://github.com/corpunum/unumsearch && cd unumsearch
+cargo build --release            # target/release/unumsearch
+```
+
+Fully static Linux binaries (no glibc dependency), e.g. for servers or phones:
+
+```bash
+rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl
+CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
+  cargo build --release --target aarch64-unknown-linux-musl
+```
+
+## Quick start
+
+```bash
+# Index a directory once and search it.
+unumsearch --root ~/src/myrepo index
+unumsearch search 'fn\s+main' ~/src/myrepo
+unumsearch search -F -i 'config.load(' ~/src/myrepo --text
+
+# Keep it fresh and serve the local API (or install the systemd unit below).
+unumsearch --root ~/src/myrepo serve
+```
+
+For permanent use, put the roots in a config file (see [`config.example.toml`](config.example.toml)):
+`--config FILE`, `$UNUMSEARCH_CONFIG`, or the platform default
+(`~/.config/unumsearch/config.toml` on Linux, `~/Library/Application Support/unumsearch/config.toml`
+on macOS, `%APPDATA%\unumsearch\config.toml` on Windows). Environment variables
+(`UNUMSEARCH_ROOTS`, `UNUMSEARCH_SPLIT_ROOTS`, `UNUMSEARCH_INDEX_DIR`, `UNUMSEARCH_LISTEN`,
+`UNUMSEARCH_MAX_MEMORY_MB`, `UNUMSEARCH_MAX_FILE_SIZE`) override the file; flags override both.
+
+### As a service (Linux, systemd user unit)
+
+```bash
+install -m 755 target/release/unumsearch ~/.local/bin/
+cp packaging/systemd/unumsearch.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now unumsearch
+```
+
+The unit runs at background CPU/IO priority with `MemoryMax=512M` (the cap includes page
+cache for files read during verification; the process's own heap stays far below it).
+
+## CLI
+
+| Command | Purpose |
+| --- | --- |
+| `index [--force]` | Build or update the index once (fails if a daemon holds the writer lock). |
+| `search PATTERN [PATH]` | Content search. `-F` literal, `-i` ignore case, `-g GLOB` (repeatable), `-l` files only, `-m N` max matches, `--candidates` unverified index candidates, `--no-scan`, `--text` for `path:line:text` output. |
+| `files [PATH]` | Filename search. `-g GLOB`, `--regex RE`, `--max N`. |
+| `status` | Units, file counts, index size, freshness, RSS. |
+| `excludes` | Effective exclude patterns, e.g. for `rg --ignore-file`. |
+| `watch` | Keep the index fresh (foreground, no API). |
+| `serve` | `watch` plus the HTTP API on `--listen` (default `127.0.0.1:7781`). |
+| `rpc [--watch]` | JSON-RPC 2.0 over stdio (one message per line). |
+| `mcp [--watch]` | MCP server over stdio. |
+
+Global flags (before the command): `--config`, `--root DIR` (repeatable), `--split-root DIR`,
+`--index-dir DIR`, `--listen ADDR`, `--exclude PATTERN`, `--max-memory-mb N`.
+
+All output is JSON: `{"ok": true, "result": {...}}` with `backend` (`index`, `scan`, `none`),
+`covered`, `fresh`, `files`, `matches` (`path`, `line`, `text`), `candidates`, `truncated`,
+per-unit `units` status and `elapsed_ms`. Errors: `{"ok": false, "error": "..."}`, exit code 2.
+
+## HTTP and JSON-RPC API
+
+`GET /status`, `GET /search`, `GET /files`, and `POST /rpc` (a JSON-RPC 2.0 message). The same
+methods (`search`, `files`, `status`, `reindex`) are available over `unumsearch rpc`.
+
+`search` parameters: `pattern` (required), `root`, `mode` (`literal` default, or `regex`),
+`ignore_case`/`ci`, `glob` (comma-separated or repeated), `files_only`, `candidates_only`,
+`max_matches`, `max_files`, `scan_fallback`. `files`: `root`, `glob`, `regex`, `max_files`.
+
+```bash
+curl 'http://127.0.0.1:7781/search?root=/src/repo&pattern=TODO&glob=*.rs&files_only=1'
+echo '{"jsonrpc":"2.0","id":1,"method":"search","params":{"pattern":"TODO","root":"/src/repo"}}' | unumsearch rpc
+```
+
+A client that matches with its own regex dialect can ask for `candidates_only=1` and verify
+the returned files itself; if `fresh` is false, `covered` is false or `truncated` is true, it
+should fall back to its own scan.
+
+## MCP server
+
+`unumsearch mcp` exposes three read-only tools: `search`, `find_files`, `index_status`.
+
+```bash
+claude mcp add unumsearch -- unumsearch mcp                      # Claude Code
+codex mcp add unumsearch -- unumsearch mcp                       # Codex CLI
+```
+
+Any MCP client can launch it the same way (`command: unumsearch`, `args: ["mcp"]`). It reads
+the index maintained by the daemon; `--watch` makes it maintain the index itself when no
+daemon is running.
+
+## Agent Skill
+
+[`skills/unumsearch/SKILL.md`](skills/unumsearch/SKILL.md) describes the CLI in the Agent Skills
+format. Copy the folder into your agent's skills directory (for Claude Code:
+`~/.claude/skills/unumsearch/`).
+
+## Library
+
+```rust
+use unumsearch::{Config, Engine, SearchOpts};
+
+let cfg = Config { roots: vec!["/src/repo".into()], ..Config::default() };
+let engine = Engine::open(cfg, true)?;          // true: become the writer if possible
+engine.index_all(false);
+let r = engine.search(&SearchOpts {
+    pattern: "fn main".into(),
+    root: "/src/repo".into(),
+    ..Default::default()
+})?;
+for m in r.matches { println!("{}:{}:{}", m.path, m.line, m.text); }
+```
+
+`unumsearch::watch::run(engine, stop)` runs the freshness loop; `unumsearch::api::call` is the
+request surface every front-end uses.
+
+## How it works
+
+- **Index**: per unit, one or more shards. A shard holds the document table (relative path, size,
+  mtime) and, for every byte trigram of the content (ASCII case-folded), a delta/varint posting
+  list of documents, each with an 8-bit mask of the bytes that follow that trigram in the
+  document. Shards are written to a temporary file and renamed into place, then mmapped.
+- **Queries**: the pattern is parsed with `regex-syntax` and turned into a boolean formula over
+  trigrams that every match must satisfy (literal sets are expanded through small classes,
+  alternations and optional parts; anything that cannot be bounded becomes "no constraint").
+  Candidates are then read and matched line by line with the `regex` crate.
+- **Freshness**: watches are placed only on directories that contain indexed files (never on
+  `node_modules/` or `target/`), so inotify limits are spent on the corpus. An event is checked
+  against the corpus rules (gitignore, excludes, size): churn in ignored files does not make a unit
+  dirty. Changed files are searched directly until the unit's rebuild (debounced) replaces its
+  shards; directory moves and ignore-file edits mark the unit not fresh until then.
+
+## Benchmarks
+
+Methodology (reproduce on your own tree with [`bench/bench.py`](bench/bench.py)): 20 real
+queries mined from a week of coding-agent tool calls (identifiers, alternations, short regexes;
+roots from a single sub-directory up to the whole tree), case-insensitive, median of 5 runs
+each, warm page cache. ripgrep runs over the same corpus definition (`unumsearch excludes` as
+`--ignore-file`, `--hidden`, same size cap). p50/p95 are across the 20 per-query medians.
+
+Machine: 16-core/32-thread x86_64, 128 GB RAM, NVMe, Linux. Corpus: 200,508 files, 3.2 GB of
+text after exclusions, in 669 units (about 80 checkouts of one JavaScript monorepo, about 520
+agent workspaces, a handful of other repositories).
+
+| Engine | Query p50 | Query p95 | Max | Index on disk | Build | Steady RSS | Regex |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| ripgrep 15.1 (no index) | 6.9 ms | 388 ms | 2.9 s | none | none | none | yes |
+| **unumsearch** daemon (HTTP) | **1.0 ms** | **30 ms** | 121 ms | **775 MB** | 63 to 85 s | about 130 MB heap | yes |
+| unumsearch CLI (new process per query) | 21 ms | 40 ms | 61 ms | (same) | | | yes |
+| zoekt (Go, trigram + positions) | 1.4 ms | 434 ms | 787 ms | 8.5 GB | 2 min 49 s | 163 MB | yes |
+| tantivy 0.24, trigram tokenizer, doc-ids only | 2.7 ms | 96 ms | 106 ms | 298 MB | 70 s (500 MB peak) | | literals only |
+
+- File sets returned by unumsearch were identical to `rg -l` for 20 of 20 queries.
+- Freshness: a file edit was searchable 1 to 21 ms after the write (watcher event, then direct
+  verification of the changed file); the background rebuild of a 40 MB unit takes about 0.5 s.
+- An unindexed `rg -l --hidden -g '!node_modules'` over the two largest roots (which also reads
+  build output and data directories) took 28 to 32 s; the same question answered from the index
+  took 0.25 s (430 matching files verified out of 792 candidates).
+- The next-byte masks cut verification work from 8,783 candidate files to 2,055 for the 20
+  queries (784 actually matching), at the cost of a larger index (442 MB without masks).
+- Binary size: 3.4 MB (x86_64, glibc), 3.6 MB static musl x86_64, 2.9 MB static musl aarch64.
+
+zoekt and tantivy were measured through small purpose-built wrappers over the same file list;
+they are a yardstick, not a tuned comparison.
+
+## Platform status
+
+| Target | Status |
+| --- | --- |
+| Linux x86_64 (glibc, musl static) | Built, tested, in daily use. |
+| Linux aarch64 (musl static) | Cross-built with `rust-lld`; index, search, watcher and daemon verified on an aarch64 Android phone running Linux. CI runs the test suite on arm64. |
+| macOS (aarch64) | `cargo check` clean; test suite runs in CI. FSEvents recursive watches. |
+| Windows x86_64 | `cargo check` clean; test suite runs in CI. Replaced shards that are still mapped are removed at the next start. |
+
+## Limitations
+
+- A unit is rebuilt as a whole when it changes (changed files are searchable immediately
+  through the overlay). Very large single units rebuild more slowly; split them with
+  `split_roots`.
+- Matching is line-oriented like ripgrep without `-U`; multi-line patterns are not supported.
+- Case-insensitive matching of non-ASCII text works but gets less help from the index (non-ASCII
+  trigrams are not case-folded), so it reads more candidate files.
+- The HTTP API binds to loopback by default and has no authentication: do not expose it.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).

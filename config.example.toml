@@ -1,0 +1,32 @@
+# unumsearch configuration.
+# Location: --config FILE, $UNUMSEARCH_CONFIG, or <platform config dir>/unumsearch/config.toml
+# (Linux: ~/.config/unumsearch/config.toml, macOS: ~/Library/Application Support/unumsearch/config.toml,
+#  Windows: %APPDATA%\unumsearch\config.toml). Environment: UNUMSEARCH_ROOTS (path-list),
+# UNUMSEARCH_SPLIT_ROOTS, UNUMSEARCH_INDEX_DIR, UNUMSEARCH_LISTEN, UNUMSEARCH_MAX_MEMORY_MB,
+# UNUMSEARCH_MAX_FILE_SIZE. Flags override both.
+
+# Directories to index. Each is one unit, rebuilt as a whole when it changes.
+roots = ["~/src/project-a", "~/src/checkouts"]
+
+# Roots whose immediate child directories become separate units: use this for a
+# folder holding many checkouts so a change rebuilds one checkout, not all.
+split_roots = ["~/src/checkouts"]
+
+# index_dir = "~/.cache/unumsearch"     # default: platform cache dir
+
+# Extra gitignore-syntax excludes, on top of the built-in defaults (build
+# output, dependency trees, binary and media formats) and the always-on secret
+# excludes (.ssh/, .env*, *.key, *.pem, id_rsa*, secrets.json, ...).
+excludes = ["models/", "datasets/", "**/fixtures/large/"]
+
+default_excludes = true    # build/vendor/binary defaults (secrets are excluded regardless)
+gitignore = true           # respect .gitignore/.ignore like ripgrep
+hidden = true              # include hidden files (like rg --hidden)
+max_file_size = 1048576    # bytes; larger files are not indexed
+max_memory_mb = 96         # index-build memory budget
+listen = "127.0.0.1:7781"  # HTTP API for `serve`
+debounce_ms = 500          # quiet period before a changed unit is rebuilt
+max_wait_ms = 10000        # upper bound under continuous changes
+rescan_secs = 300          # full rescan (catches anything the watcher missed)
+watch = true               # filesystem notifications
+threads = 0                # 0 = auto (max 8)

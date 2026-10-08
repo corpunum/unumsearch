@@ -1,0 +1,39 @@
+[package]
+name = "unumsearch"
+version = "0.1.0"
+edition = "2021"
+description = "Always-fresh local file and code search: trigram index, ripgrep-compatible corpus, CLI/daemon/JSON-RPC/MCP front-ends"
+license = "Apache-2.0"
+rust-version = "1.89"
+
+[lib]
+name = "unumsearch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "unumsearch"
+path = "src/main.rs"
+
+[dependencies]
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
+regex-syntax = "0.8"
+memmap2 = "0.9"
+notify = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+dirs = "6"
+tiny_http = "0.12"
+lexopt = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"

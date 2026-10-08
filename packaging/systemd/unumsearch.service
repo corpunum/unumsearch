@@ -1,0 +1,23 @@
+# systemd user unit: keeps the unumsearch index fresh and serves the local API.
+# Install: cp unumsearch.service ~/.config/systemd/user/ && systemctl --user enable --now unumsearch
+[Unit]
+Description=unumsearch indexed file and code search daemon
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/unumsearch serve
+Restart=on-failure
+RestartSec=10
+# Bounded resources: the index is mmapped (reclaimable page cache); the
+# heap stays small. Background priority for CPU and IO.
+# No MemoryHigh: it throttles page-cache reads during verification.
+MemoryMax=512M
+# Fewer glibc arenas: less retained heap from short-lived walker threads.
+Environment=MALLOC_ARENA_MAX=2
+MemorySwapMax=0
+Nice=15
+IOSchedulingClass=idle
+
+[Install]
+WantedBy=default.target
