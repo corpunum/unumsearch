@@ -42,9 +42,34 @@ milliseconds.
 
 ## Install
 
+Prebuilt binaries for Linux (x86_64, aarch64; fully static musl), macOS (x86_64, arm64) and
+Windows (x86_64) are on the [releases page](https://github.com/corpunum/unumsearch/releases).
+The install scripts pick the right archive, verify it against the release's `SHA256SUMS` and
+install the binary (default `~/.local/bin`; `%LOCALAPPDATA%\Programs\unumsearch` on Windows):
+
 ```bash
-cargo install --git https://github.com/corpunum/unumsearch
-# or build from source
+curl -fsSL https://github.com/corpunum/unumsearch/releases/latest/download/install.sh | sh
+```
+
+```powershell
+irm https://github.com/corpunum/unumsearch/releases/latest/download/install.ps1 | iex
+```
+
+`UNUMSEARCH_VERSION=v0.1.0` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
+Every archive and `SHA256SUMS` also carry a GitHub build-provenance attestation:
+
+```bash
+gh attestation verify unumsearch-v0.1.0-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
+```
+
+Each archive contains the binary, this README, the license, `config.example.toml`, the Agent
+Skill (`skills/`) and the systemd unit (`packaging/`).
+
+From source (Rust 1.89 or newer):
+
+```bash
+cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.0
+# or
 git clone https://github.com/corpunum/unumsearch && cd unumsearch
 cargo build --release            # target/release/unumsearch
 ```
@@ -87,6 +112,59 @@ systemctl --user daemon-reload && systemctl --user enable --now unumsearch
 
 The unit runs at background CPU/IO priority with `MemoryMax=512M` (the cap includes page
 cache for files read during verification; the process's own heap stays far below it).
+
+## Use it from your agent or harness
+
+unumsearch works with any agent, harness or script: it speaks MCP, a local HTTP/JSON API, stdio
+JSON-RPC, the Agent Skills format and plain CLI. Exact, checked configuration for each tool is in
+[`docs/integrations/`](docs/integrations/README.md).
+
+- **[OpenUnum](https://github.com/corpunum/openunum)**: first-class. OpenUnum's built-in search
+  tools use the unumsearch daemon as a fast-search backend and fall back to their own walk
+  automatically when the daemon is absent, stale or does not cover a directory. OpenUnum
+  installers ship unumsearch and enable the backend by default.
+  [Guide](docs/integrations/openunum.md).
+- **Claude Code**: `claude mcp add unumsearch -- unumsearch mcp`, or the skill in
+  `~/.claude/skills/`. [Guide](docs/integrations/claude-code.md).
+- **OpenAI Codex CLI**: `codex mcp add unumsearch -- unumsearch mcp` (`[mcp_servers.unumsearch]`
+  in `~/.codex/config.toml`). [Guide](docs/integrations/codex.md).
+- **Gemini CLI**: `gemini mcp add unumsearch unumsearch mcp`. [Guide](docs/integrations/gemini-cli.md).
+- **Cursor, VS Code / GitHub Copilot agent mode, Windsurf, Cline, Roo Code, Continue, Zed**:
+  stdio MCP server `unumsearch mcp`. [Guide](docs/integrations/editors.md).
+- **Goose**, **OpenCode**: MCP. [Goose](docs/integrations/goose.md), [OpenCode](docs/integrations/opencode.md).
+- **OpenClaw**: `openclaw mcp set unumsearch '{"command":"unumsearch","args":["mcp"]}'` or the
+  skill. [Guide](docs/integrations/openclaw.md).
+- **Pi**: the skill in `~/.pi/agent/skills/` (Pi has no MCP by design). [Guide](docs/integrations/pi.md).
+- **Aider**: `/run unumsearch search --text PATTERN DIR` (no MCP client). [Guide](docs/integrations/aider.md).
+- **Any MCP client**, **Agent Skills consumers**, **LangChain / LlamaIndex / custom agents**
+  (HTTP API), **shell and CI**: [MCP](docs/integrations/generic-mcp.md),
+  [skills](docs/integrations/agent-skills.md), [HTTP](docs/integrations/http-api.md),
+  [shell/CI](docs/integrations/shell-ci.md).
+
+## Agnostic by design
+
+- **No GPU, no model, no network.** It is a plain trigram index plus a regex engine; it never
+  calls a model and never opens an outbound connection. The HTTP API listens on loopback only.
+- **Any agent or harness.** Nothing in the engine knows about a particular agent. The same
+  `api::call` surface backs the CLI, HTTP, JSON-RPC and MCP front-ends, so every client gets the
+  same answers, including the `fresh`/`covered`/`truncated` flags that let it decide when to
+  fall back to its own scan.
+- **Any OS.** One static binary per platform; the watcher uses each OS's native notification API.
+- **Stable interfaces.** CLI flags, JSON fields and HTTP/JSON-RPC parameters only grow; existing
+  fields keep their meaning.
+
+## Compatibility
+
+| OS | Arch | Release binary | CLI | Daemon + HTTP | JSON-RPC (stdio) | MCP (stdio) | Watcher | Service |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Linux | x86_64 | static musl | yes | yes | yes | yes | inotify | systemd user unit (`packaging/systemd`) |
+| Linux (incl. Android/Termux-style userlands) | aarch64 | static musl | yes | yes | yes | yes | inotify | systemd user unit |
+| macOS | arm64 | yes | yes | yes | yes | yes | FSEvents | launchd agent (see FAQ) |
+| macOS | x86_64 | yes | yes | yes | yes | yes | FSEvents | launchd agent |
+| Windows | x86_64 | yes (static CRT) | yes | yes | yes | yes | ReadDirectoryChangesW | scheduled task (see FAQ) |
+
+The test suite runs in CI on Linux x86_64 and arm64, macOS arm64 and Windows x86_64; the macOS
+x86_64 build is cross-compiled from arm64.
 
 ## CLI
 
@@ -136,15 +214,16 @@ claude mcp add unumsearch -- unumsearch mcp                      # Claude Code
 codex mcp add unumsearch -- unumsearch mcp                       # Codex CLI
 ```
 
-Any MCP client can launch it the same way (`command: unumsearch`, `args: ["mcp"]`). It reads
+Any MCP client can launch it the same way (`command: unumsearch`, `args: ["mcp"]`); see
+[`docs/integrations/`](docs/integrations/README.md) for per-tool configuration. It reads
 the index maintained by the daemon; `--watch` makes it maintain the index itself when no
 daemon is running.
 
 ## Agent Skill
 
 [`skills/unumsearch/SKILL.md`](skills/unumsearch/SKILL.md) describes the CLI in the Agent Skills
-format. Copy the folder into your agent's skills directory (for Claude Code:
-`~/.claude/skills/unumsearch/`).
+format. Copy the folder into your agent's skills directory (Claude Code: `~/.claude/skills/`;
+Codex, OpenClaw and Pi: `~/.agents/skills/`). See [agent-skills.md](docs/integrations/agent-skills.md).
 
 ## Library
 
@@ -220,8 +299,8 @@ they are a yardstick, not a tuned comparison.
 | --- | --- |
 | Linux x86_64 (glibc, musl static) | Built, tested, in daily use. |
 | Linux aarch64 (musl static) | Cross-built with `rust-lld`; index, search, watcher and daemon verified on an aarch64 Android phone running Linux. CI runs the test suite on arm64. |
-| macOS (aarch64) | `cargo check` clean; test suite runs in CI. FSEvents recursive watches. |
-| Windows x86_64 | `cargo check` clean; test suite runs in CI. Replaced shards that are still mapped are removed at the next start. |
+| macOS (arm64, x86_64) | Test suite runs in CI (arm64); release binaries for both. FSEvents recursive watches. |
+| Windows x86_64 | Test suite runs in CI; release binary with static CRT. Replaced shards that are still mapped are removed at the next start. |
 
 ## Limitations
 
@@ -232,6 +311,39 @@ they are a yardstick, not a tuned comparison.
 - Case-insensitive matching of non-ASCII text works but gets less help from the index (non-ASCII
   trigrams are not case-folded), so it reads more candidate files.
 - The HTTP API binds to loopback by default and has no authentication: do not expose it.
+
+## FAQ
+
+**Does it need a daemon?** No. The CLI and `unumsearch mcp` work on their own: without an index
+they scan directly with the same corpus rules. The daemon (`serve`, or the user service) keeps
+the index fresh so queries take milliseconds; `mcp --watch` and `rpc --watch` maintain it
+in-process instead.
+
+**Will an agent ever see stale results?** Every answer reports `fresh`. Changed files are
+searched directly until their unit is rebuilt, so edits show up within milliseconds; when a
+unit cannot be trusted (directory moves, ignore-file edits) the answer says `fresh: false` and
+clients such as OpenUnum fall back to their own scan.
+
+**Does it index my secrets?** No. `.ssh/`, `.gnupg/`, `.aws/`, `.env*`, `*.key`, `*.pem`,
+`id_rsa*`, `secrets.json`, `.netrc`, `.npmrc` and credentials files are excluded regardless of
+configuration.
+
+**How much memory does it use?** The index is mmapped (reclaimable page cache); the heap stays
+around 100 to 150 MB for a 200,000-file corpus. `max_memory_mb` bounds index builds; the systemd
+unit caps the service at 512 MB.
+
+**How do I run it as a service on macOS or Windows?** macOS: a launchd agent in
+`~/Library/LaunchAgents/` with `ProgramArguments` `[path/to/unumsearch, serve]`, `RunAtLoad` and
+`KeepAlive`. Windows: a scheduled task at logon, e.g.
+`schtasks /Create /SC ONLOGON /TN unumsearch /TR "\"%LOCALAPPDATA%\Programs\unumsearch\unumsearch.exe\" serve"`.
+OpenUnum's installers set these up automatically.
+
+**Is it a replacement for ripgrep?** For repeated searches over large, mostly unchanged trees,
+yes; it returns the same file sets as `rg -l` over the same corpus. For one-off searches of a
+small directory, `rg` is just as fast and needs no index.
+
+**Is it on crates.io?** Not yet; install from the release binaries or with
+`cargo install --git`.
 
 ## License
 

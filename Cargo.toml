@@ -5,6 +5,12 @@ edition = "2021"
 description = "Always-fresh local file and code search: trigram index, ripgrep-compatible corpus, CLI/daemon/JSON-RPC/MCP front-ends"
 license = "Apache-2.0"
 rust-version = "1.89"
+repository = "https://github.com/corpunum/unumsearch"
+homepage = "https://github.com/corpunum/unumsearch"
+readme = "README.md"
+keywords = ["search", "grep", "index", "mcp", "trigram"]
+categories = ["command-line-utilities", "development-tools", "filesystem"]
+exclude = ["/bench", "/.github"]
 
 [lib]
 name = "unumsearch"
