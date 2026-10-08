@@ -729,7 +729,10 @@ impl Engine {
                 // A dirty unit is still exact when every change is a known
                 // file: those files are verified directly (see `pending`).
                 let exact = !s.dirty || !u.pending_unknown;
-                if !s.ready || !exact || !(s.watched || (alive && recent)) {
+                // The writer with a watcher trusts only watched units; readers
+                // and watcher-less setups accept a recent rescan.
+                let tracked = s.watched || ((!self.writer || !self.cfg.watch) && alive && recent);
+                if !s.ready || !exact || !tracked {
                     fresh = false;
                 }
                 out.push(s);

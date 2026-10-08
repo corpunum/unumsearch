@@ -44,18 +44,21 @@ struct Ctx<W: Watcher> {
 }
 
 impl<W: Watcher> Ctx<W> {
-    fn attach(&mut self, unit: &str, files: &[FileEntry]) {
+    /// Watch the unit's directories; returns how many watches were added.
+    fn attach(&mut self, unit: &str, files: &[FileEntry]) -> usize {
         let Some(w) = self.watcher.as_mut() else {
-            return;
+            return 0;
         };
         let unit_p = PathBuf::from(unit);
         let mut ok = true;
+        let mut added = 0;
         let mut watched = self.engine.watched_dirs.lock().unwrap();
         if RECURSIVE {
             if !watched.contains(&unit_p) {
                 ok = w.watch(&unit_p, RecursiveMode::Recursive).is_ok();
                 if ok {
                     watched.insert(unit_p.clone());
+                    added += 1;
                 }
             }
         } else {
@@ -65,6 +68,7 @@ impl<W: Watcher> Ctx<W> {
                 }
                 if w.watch(&d, RecursiveMode::NonRecursive).is_ok() {
                     watched.insert(d);
+                    added += 1;
                 } else {
                     ok = false;
                 }
@@ -72,6 +76,7 @@ impl<W: Watcher> Ctx<W> {
         }
         drop(watched);
         self.engine.set_watched(unit, ok);
+        added
     }
 
     fn detach_missing(&mut self) {
@@ -101,8 +106,16 @@ impl<W: Watcher> Ctx<W> {
     }
 
     fn build(&mut self, unit: &str) {
-        if let Some(files) = self.engine.build_unit(unit, false) {
-            self.attach(unit, &files);
+        // Changes made between a listing and the watches that cover them
+        // would be missed until the next rescan, so after adding watches
+        // list once more (cheap when nothing changed: fingerprint match).
+        for _ in 0..3 {
+            let Some(files) = self.engine.build_unit(unit, false) else {
+                return;
+            };
+            if self.attach(unit, &files) == 0 {
+                return;
+            }
         }
     }
 
