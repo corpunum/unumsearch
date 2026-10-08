@@ -416,7 +416,52 @@ fn pending_changes_are_searchable_before_rebuild() {
         })
         .unwrap();
     assert_eq!(f.files.len(), 1);
-    // A change to a gitignored file must not dirty the unit.
+    // Secrets created after the build must never be served from the overlay
+    // either (at the unit root and below it).
+    write(&root, ".env.local", b"overlay_secret_token=1\n");
+    write(&root, "server.pem", b"overlay_secret_token\n");
+    write(&root, "src/id_rsa", b"overlay_secret_token\n");
+    write(&root, "src/visible.rs", b"overlay_secret_token\n");
+    let t2 = Instant::now();
+    loop {
+        let r = e
+            .search(&SearchOpts {
+                pattern: "overlay_secret_token".into(),
+                root: root.clone(),
+                files_only: true,
+                ..Default::default()
+            })
+            .unwrap();
+        if !r.files.is_empty() {
+            assert_eq!(
+                rels(&root, &r.files),
+                vec!["src/visible.rs"],
+                "secrets leaked"
+            );
+            break;
+        }
+        assert!(
+            t2.elapsed() < Duration::from_secs(10),
+            "overlay never saw the new file"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let all = e
+        .files(&FilesOpts {
+            root: root.clone(),
+            globs: vec![],
+            regex: None,
+            max_files: 1000,
+            scan_fallback: false,
+        })
+        .unwrap();
+    let names = rels(&root, &all.files);
+    for secret in [".env.local", "server.pem", "src/id_rsa"] {
+        assert!(
+            !names.iter().any(|n| n == secret),
+            "{secret} listed: {names:?}"
+        );
+    }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     h.join().unwrap();
 }

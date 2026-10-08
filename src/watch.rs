@@ -164,7 +164,15 @@ fn relevant(
         .entry(parent.to_path_buf())
         .or_insert_with(|| walk::corpus_entries(&engine.cfg, unit_p, parent));
     if !entries.contains(&name) {
-        return None;
+        // The cached listing may predate this file (several files written in
+        // one drain cycle): list again before concluding it is not corpus.
+        if !p.exists() {
+            return None;
+        }
+        *entries = walk::corpus_entries(&engine.cfg, unit_p, parent);
+        if !entries.contains(&name) {
+            return None;
+        }
     }
     // A new directory may hold any number of files: rebuild before trusting.
     if p.is_dir() {

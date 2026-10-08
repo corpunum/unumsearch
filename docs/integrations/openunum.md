@@ -32,6 +32,7 @@ enable it as below).
 
    ```toml
    # One unit per agent workspace / worktree, so a change rebuilds one checkout only.
+   roots = ["~/.openunum/workspaces", "~/.openunum/worktrees"]
    split_roots = ["~/.openunum/workspaces", "~/.openunum/worktrees"]
    max_memory_mb = 256
    ```

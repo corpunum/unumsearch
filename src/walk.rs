@@ -139,13 +139,19 @@ pub fn corpus_entries(cfg: &Config, unit: &Path, dir: &Path) -> std::collections
         .max_depth(Some(1));
     let dir_owned = dir.to_path_buf();
     let unit_owned = unit.to_path_buf();
+    let filter_excl = excl.clone();
     wb.filter_entry(move |e| {
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        e.path() == dir_owned || !is_excluded(&excl, &unit_owned, e.path(), is_dir)
+        e.path() == dir_owned || !is_excluded(&filter_excl, &unit_owned, e.path(), is_dir)
     });
     let mut out = std::collections::HashSet::new();
     for e in wb.build().flatten() {
-        if e.depth() == 1 {
+        // Check the excludes again on every entry: `filter_entry` alone let
+        // excluded files at `max_depth` through, and this listing decides
+        // which changed files are searched before the next rebuild (secrets
+        // must never be among them).
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        if e.depth() == 1 && !is_excluded(&excl, unit, e.path(), is_dir) {
             out.insert(e.file_name().to_string_lossy().into_owned());
         }
     }
