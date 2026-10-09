@@ -362,6 +362,23 @@ private daemon, so it never touches a running one.
 [`bench/bench.py`](bench/bench.py) is a simpler single-pass version for a quick check on your own
 tree.
 
+### See it yourself
+
+```bash
+# a throwaway daemon for this directory (or use your running service if its roots include it)
+unumsearch --root . --index-dir /tmp/race-index --listen 127.0.0.1:7790 serve &
+python3 bench/race.py --root . --url http://127.0.0.1:7790   # --queries FILE for your own regexes
+```
+
+[`bench/race.py`](bench/race.py) (Python standard library only) runs the same queries through rg
+(with the index's exclude rules), the unumsearch daemon and, if installed, ugrep, one engine at a
+time and interleaved per query, with a live timer and bar per engine and a final card: totals,
+speed-up and whether each engine returned the same files as rg. Nothing is replayed; the bars grow
+only while a real process or request runs. `--unumsearch-cli` times one-shot CLI processes
+instead of the daemon. A 12-query run over about 180 agent worktrees on the machine above (warm
+cache): rg 4.0 s, unumsearch 0.22 s, ugrep 25 s; unumsearch returned the same files as rg for 12
+of 12 queries, ugrep for 11 (it has no file-size cap).
+
 ## Platform status
 
 | Target | Status |
