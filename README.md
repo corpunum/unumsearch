@@ -365,8 +365,9 @@ tree.
 ### See it yourself
 
 ```bash
-unumsearch --root . serve &       # or the user service, if its roots include this directory
-python3 bench/race.py --root .     # built-in agent-style regexes; --queries FILE for your own
+# a throwaway daemon for this directory (or use your running service if its roots include it)
+unumsearch --root . --index-dir /tmp/race-index --listen 127.0.0.1:7790 serve &
+python3 bench/race.py --root . --url http://127.0.0.1:7790   # --queries FILE for your own regexes
 ```
 
 [`bench/race.py`](bench/race.py) (Python standard library only) runs the same queries through rg
