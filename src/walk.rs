@@ -110,6 +110,80 @@ pub fn list_depth(cfg: &Config, root: &Path, max_depth: Option<usize>) -> Vec<Fi
     v
 }
 
+/// Does the corpus walk of `unit` reach `target` (a path below `unit`)? It
+/// does unless `target` or a directory between them is pruned by the walk's
+/// rules: ignore files, hidden-file rules, excludes (secrets included),
+/// symlinks (never followed) or, for a file, the size cap. Only the
+/// directories on the way to `target` are read.
+pub fn reaches(cfg: &Config, unit: &Path, target: &Path) -> bool {
+    let Ok(rel) = target.strip_prefix(unit) else {
+        return false;
+    };
+    let depth = rel.components().count();
+    if depth == 0 {
+        return true;
+    }
+    let excl = exclude_matcher(cfg, unit);
+    let mut wb = WalkBuilder::new(unit);
+    wb.max_depth(Some(depth))
+        .hidden(!cfg.hidden)
+        .git_ignore(cfg.gitignore)
+        .git_global(cfg.gitignore)
+        .git_exclude(cfg.gitignore)
+        .ignore(cfg.gitignore)
+        .parents(cfg.gitignore)
+        .follow_links(false);
+    let (unit_owned, target_owned) = (unit.to_path_buf(), target.to_path_buf());
+    // Same pruning as `list`, restricted to the path towards `target`.
+    wb.filter_entry(move |e| {
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        e.path() == unit_owned
+            || (target_owned.starts_with(e.path()) && !excl.matched(e.path(), is_dir).is_ignore())
+    });
+    for e in wb.build().flatten() {
+        if e.path() == target {
+            // A directory is walked; a file is indexed within the size cap; a
+            // symlink (or anything else) never is.
+            return match e.file_type() {
+                Some(t) if t.is_dir() => true,
+                Some(t) if t.is_file() => e.metadata().is_ok_and(|m| m.len() <= cfg.max_file_size),
+                _ => false,
+            };
+        }
+    }
+    false
+}
+
+/// Directories directly inside the split root `root` that its corpus walk
+/// would descend into but that are not units of their own (hidden names):
+/// a split root's index does not cover them.
+pub fn non_unit_children(cfg: &Config, root: &Path) -> Vec<String> {
+    let excl = std::sync::Arc::new(exclude_matcher(cfg, root));
+    let mut wb = WalkBuilder::new(root);
+    wb.max_depth(Some(1))
+        .hidden(!cfg.hidden)
+        .git_ignore(cfg.gitignore)
+        .git_global(cfg.gitignore)
+        .git_exclude(cfg.gitignore)
+        .ignore(cfg.gitignore)
+        .parents(cfg.gitignore)
+        .follow_links(false);
+    let root_owned = root.to_path_buf();
+    wb.filter_entry(move |e| {
+        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        e.path() == root_owned || (is_dir && !excl.matched(e.path(), true).is_ignore())
+    });
+    let mut out: Vec<String> = wb
+        .build()
+        .flatten()
+        .filter(|e| e.depth() == 1 && e.file_type().is_some_and(|t| t.is_dir()))
+        .filter(|e| e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| e.path().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
 /// FNV-1a over the listing: changes when any path, size or mtime changes.
 pub fn fingerprint(files: &[FileEntry]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;

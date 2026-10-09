@@ -42,6 +42,12 @@ unumsearch status
 - `fresh`: `true` when every covering index unit is up to date. When `false`,
   recent edits may be missing: re-run shortly or use `rg` for that directory.
 - `truncated`: more results exist than returned (`-m N` raises the cap).
+- `covered`: `false` when the index does not hold the whole directory (for
+  example a gitignored or excluded tree); `uncovered` lists those paths with a
+  `reason`. For `excluded`/`not_indexed`, scan them (`rg`), unless `backend`
+  is already `scan`. For `secret`, do not search them with any tool.
+- `complete`: `covered && fresh && !truncated`; only then is an empty answer
+  proof that nothing matches.
 
 ## Corpus rules (same as ripgrep)
 

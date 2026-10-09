@@ -24,6 +24,7 @@ Status legend: **tested** = run end to end on Linux with the tool's current rele
 | Continue | MCP | docs | [editors.md](editors.md#continue) |
 | Zed | MCP | docs | [editors.md](editors.md#zed) |
 | Goose | MCP | docs | [goose.md](goose.md) |
+| Hermes Agent | MCP | docs | [hermes.md](hermes.md) |
 | OpenClaw | MCP + Agent Skill | docs + checked against a working config | [openclaw.md](openclaw.md) |
 | Pi | Agent Skill (Pi has no MCP by design) | docs (bundled with pi 0.84) | [pi.md](pi.md) |
 | Aider | CLI via `/run` (no MCP client) | docs | [aider.md](aider.md) |
