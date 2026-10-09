@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.1.5 (2026-10-09) - Honest Coverage
+
+Fixes a correctness gap found by replaying 1,267 real agent searches. API additive.
+
+- **Fix: a root inside an excluded directory was reported as covered.** Searching a directory
+  that the indexed corpus leaves out (a gitignored kernel tree, an excluded `datasets/`, a
+  hidden directory with hidden files off, a symlinked directory, an over-size file) returned no
+  files with `covered: true, fresh: true`, while `rg` in that directory found matches (19 of the
+  1,267 replayed searches). Such a root is now `covered: false` (so `complete: false`) and, with
+  the scan fallback on (the default), is scanned: all 19 now return exactly `rg`'s files. The
+  decision costs nothing when the root is a whole unit, a binary search when the index has files
+  under the root, and one walk along the path (remembered per unit build) otherwise.
+- **New `uncovered` field** on search and files results (and in `lookup` and `all_roots`
+  answers): the paths the index does not cover, each with a `reason`: `excluded`,
+  `not_indexed` (scan them) or `secret` (never scanned; do not fall back to scanning it).
+  Omitted when the answer is covered.
+- **Split roots** report their non-unit child directories (hidden names, which the corpus
+  walk would include) as `uncovered`, instead of claiming the whole root is covered. Files
+  returned are unchanged.
+- Covered answers are unchanged: in the replay the other 1,248 searches returned the same files;
+  12 of them, also rooted in excluded directories where `rg` found nothing either, now say
+  `covered: false` too.
+- Docs: Hermes Agent integration; README and RELIABILITY state what `covered` guarantees.
+
 ## v0.1.4 (2026-10-09) - Bounded Memory
 
 Fixes the daemon out-of-memory found while benchmarking for launch, makes large queries faster,

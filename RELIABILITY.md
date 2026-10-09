@@ -16,14 +16,22 @@ What unumsearch promises, how that is tested, and how its speed is measured.
    numbers and an old shard is only removed after the manifest that replaces it is on disk.
 4. **Readers see changes at once.** The writer publishes dirty/pending state to other processes
    (CLI, MCP) within a few milliseconds of noticing a change, not on a timer.
-5. **Secrets stay out.** `.ssh/`, `.env*`, keys, tokens and similar are never indexed, never
+5. **Honest coverage.** `covered: true` means the index holds every file a walk of the requested
+   root would search under the same corpus rules, so an empty answer really is empty. A root
+   inside a directory the index leaves out (an ignored or excluded directory, a hidden one when
+   hidden files are off, a symlinked directory, an over-size file) or a split root with non-unit
+   child directories says `covered: false` and lists the `uncovered` paths with a reason:
+   `excluded` or `not_indexed` (scan them) or `secret` (never scanned; a client must not fall
+   back to scanning it either). Excluded directories *below* a covered root are not part of its
+   corpus and do not make it uncovered (as with `rg`, ignore rules apply).
+6. **Secrets stay out.** `.ssh/`, `.env*`, keys, tokens and similar are never indexed, never
    served from the overlay, never scanned, and a request cannot start a walk inside them.
-6. **The HTTP API is confined.** Roots must be inside configured roots (symlinks and `..`
+7. **The HTTP API is confined.** Roots must be inside configured roots (symlinks and `..`
    resolved), `Host` must be loopback, bodies and result counts are capped, a token is required
    off loopback.
-7. **Corruption is survivable.** A truncated, scrambled or missing shard or manifest never
+8. **Corruption is survivable.** A truncated, scrambled or missing shard or manifest never
    panics a reader; the unit reports not-ready and the writer rebuilds it.
-8. **Bounded memory, honest truncation.** A query's returned paths and lines are capped by
+9. **Bounded memory, honest truncation.** A query's returned paths and lines are capped by
    `max_files`, `max_matches` and `max_result_mb`; past a cap the answer is cut in path order
    (deterministically) and says `truncated: true`, `complete: false`. The daemon runs at most
    `max_concurrent_queries` searches at once. The watcher never queues read-only events and its
@@ -39,6 +47,7 @@ What unumsearch promises, how that is tested, and how its speed is measured.
 | Simulated disk failure during a rebuild | `tests/trust_failpoint.rs` |
 | Result budget and deterministic truncation, a busy watcher flooded with reads and writes (counting allocator) | `tests/bounded.rs` |
 | CLI, stdio JSON-RPC, MCP | `tests/cli.rs` |
+| Coverage of roots under each exclusion kind (ignore files, excludes, secrets, hidden, size, symlinks, split-root non-unit children) across the engine, API and CLI | `tests/coverage.rs` |
 
 CI runs all of it on Linux x86_64 and arm64, macOS and Windows. Reproduce or deepen the
 differential test locally:

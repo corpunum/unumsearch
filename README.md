@@ -63,11 +63,11 @@ curl -fsSL https://github.com/corpunum/unumsearch/releases/latest/download/insta
 irm https://github.com/corpunum/unumsearch/releases/latest/download/install.ps1 | iex
 ```
 
-`UNUMSEARCH_VERSION=v0.1.4` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
+`UNUMSEARCH_VERSION=v0.1.5` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
 Every archive and `SHA256SUMS` also carry a GitHub build-provenance attestation:
 
 ```bash
-gh attestation verify unumsearch-v0.1.4-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
+gh attestation verify unumsearch-v0.1.5-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
 ```
 
 Each archive contains the binary, this README, the license, `config.example.toml`, the Agent
@@ -76,7 +76,7 @@ Skill (`skills/`) and the systemd unit (`packaging/`).
 From source (Rust 1.89 or newer):
 
 ```bash
-cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.4
+cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.5
 # or
 git clone https://github.com/corpunum/unumsearch && cd unumsearch
 cargo build --release            # target/release/unumsearch
@@ -145,7 +145,8 @@ JSON-RPC, the Agent Skills format and plain CLI. Exact, checked configuration fo
 - **Gemini CLI**: `gemini mcp add unumsearch unumsearch mcp`. [Guide](docs/integrations/gemini-cli.md).
 - **Cursor, VS Code / GitHub Copilot agent mode, Windsurf, Cline, Roo Code, Continue, Zed**:
   stdio MCP server `unumsearch mcp`. [Guide](docs/integrations/editors.md).
-- **Goose**, **OpenCode**: MCP. [Goose](docs/integrations/goose.md), [OpenCode](docs/integrations/opencode.md).
+- **Goose**, **Hermes Agent**, **OpenCode**: MCP. [Goose](docs/integrations/goose.md),
+  [Hermes](docs/integrations/hermes.md), [OpenCode](docs/integrations/opencode.md).
 - **OpenClaw**: `openclaw mcp set unumsearch '{"command":"unumsearch","args":["mcp"]}'` or the
   skill. [Guide](docs/integrations/openclaw.md).
 - **Pi**: the skill in `~/.pi/agent/skills/` (Pi has no MCP by design). [Guide](docs/integrations/pi.md).
@@ -201,6 +202,15 @@ All output is JSON: `{"ok": true, "result": {...}}` with `backend` (`index`, `sc
 `covered`, `fresh`, `files`, `matches` (`path`, `line`, `text`), `candidates`, `truncated`,
 `complete` (`covered && fresh && !truncated`), per-unit `units` status and `elapsed_ms`. Errors: `{"ok": false, "error": "..."}`, exit code 2.
 
+`covered: true` means the index holds every file of the root's corpus: the files a walk of that
+root with the same rules (ignore files, excludes, hidden, size cap) would search. When the root
+or part of it is outside the index, `covered` is `false` and `uncovered` lists those paths with a
+`reason`: `excluded` (inside a directory the indexed corpus leaves out, e.g. a gitignored kernel
+tree or an excluded `datasets/`) and `not_indexed` (no unit holds it): scan them, which
+unumsearch itself does unless `scan_fallback` is off (`backend: "scan"`). `secret`: a secret
+location, never indexed and never scanned; do not search it with another tool either (the HTTP,
+RPC and MCP front-ends refuse such roots outright).
+
 ## HTTP and JSON-RPC API
 
 `GET /status`, `GET /search`, `GET /files`, `GET /lookup`, and `POST /rpc` (a JSON-RPC 2.0
@@ -216,7 +226,8 @@ one call; the answer adds a per-root `roots` summary). `files`: `root`, `glob`, 
 `lookup` answers "which files contain each of these patterns?" for many patterns in one call:
 `patterns` (JSON array, or newline-separated over `GET`), `root` or `all_roots`, `mode`
 (`literal` default), `ignore_case`, `glob`, `max_files` per pattern (default 100). The result has
-one entry per pattern (`pattern`, `found`, `files`, `covered`, `fresh`, `truncated`, `complete`). It runs
+one entry per pattern (`pattern`, `found`, `files`, `covered`, `fresh`, `truncated`, `complete`),
+plus the `uncovered` paths of all its roots. It runs
 inside the daemon, so it avoids per-request overhead and contention from many parallel calls.
 
 ```bash

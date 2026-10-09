@@ -54,6 +54,10 @@ pub struct UnitState {
     pub pending_unknown: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// For a split root's own unit: directories directly inside it that its
+    /// corpus contains but no unit indexes (hidden names), absolute paths.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncovered: Vec<String>,
     /// Consecutive failed rebuilds (drives the retry back-off).
     #[serde(skip)]
     pub failures: u32,
@@ -126,6 +130,9 @@ pub struct Engine {
     splits: OnceLock<Vec<PathBuf>>,
     /// Queries running now (see [`Engine::query_slot`]).
     running: (Mutex<usize>, std::sync::Condvar),
+    /// Whether the corpus walk of a unit reaches a sub-directory, keyed by
+    /// (unit, sub) and valid for the unit fingerprint it was computed at.
+    reach_cache: Mutex<HashMap<(String, String), (u64, bool)>>,
 }
 
 /// A held query slot; dropping it lets a waiting query run.
@@ -202,9 +209,34 @@ pub struct Match {
     pub text: String,
 }
 
+/// A part of the requested root that the index does not cover.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct Uncovered {
+    pub path: String,
+    /// Why, and what a caller may do about it:
+    /// - `"excluded"`: the index leaves the path out (ignore files, excludes,
+    ///   hidden-file rules, the size cap, a symlink) - scan it to search it;
+    /// - `"not_indexed"`: no configured root (or no unit) contains it - scan it;
+    /// - `"secret"`: a secret location (`.ssh`, `.env`, keys, ...) - never
+    ///   indexed and never scanned; do not search it with another tool either.
+    pub reason: &'static str,
+}
+
+impl Uncovered {
+    fn new(p: &Path, reason: &'static str) -> Self {
+        Uncovered {
+            path: path_str(p),
+            reason,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct SearchResult {
     pub backend: &'static str,
+    /// The index (with its overlay of changed files) contains every file of
+    /// the root's corpus; see RELIABILITY.md. `false` whenever any part of
+    /// the root is outside the index, listed in `uncovered`.
     pub covered: bool,
     pub fresh: bool,
     pub files: Vec<String>,
@@ -216,6 +248,9 @@ pub struct SearchResult {
     /// scan of the root would return now.
     pub complete: bool,
     pub units: Vec<UnitStatus>,
+    /// The parts of the root the index does not cover (empty when `covered`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub uncovered: Vec<Uncovered>,
     pub elapsed_ms: f64,
 }
 
@@ -254,6 +289,9 @@ pub struct FilesResult {
     /// `covered && fresh && !truncated` (see [`SearchResult::complete`]).
     pub complete: bool,
     pub units: Vec<UnitStatus>,
+    /// The parts of the root the index does not cover (empty when `covered`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub uncovered: Vec<Uncovered>,
     pub elapsed_ms: f64,
 }
 
@@ -375,7 +413,34 @@ struct Cover {
     units: Vec<String>,
     /// '/'-separated path of root inside the single covering unit ("" = whole unit).
     sub: String,
+    /// Parts of the root no unit covers (a split root's non-unit children).
+    uncovered: Vec<Uncovered>,
 }
+
+/// Does the unit's index hold a document at `sub` or below it? Documents are
+/// stored in path order, so this is a binary search per shard.
+fn shards_have_sub(shards: &[Shard], sub: &str) -> bool {
+    let dir = format!("{sub}/");
+    let lower_bound = |s: &Shard, key: &str| {
+        let (mut lo, mut hi) = (0usize, s.ndocs());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            match s.doc(mid) {
+                Some(d) if d.rel < key => lo = mid + 1,
+                _ => hi = mid,
+            }
+        }
+        lo
+    };
+    shards.iter().any(|s| {
+        s.doc(lower_bound(s, sub)).is_some_and(|d| d.rel == sub)
+            || s.doc(lower_bound(s, &dir))
+                .is_some_and(|d| d.rel.starts_with(&dir))
+    })
+}
+
+/// Bound on remembered sub-root coverage decisions.
+const COVER_CACHE_MAX: usize = 4096;
 
 impl Engine {
     /// Open the index directory. `want_writer` tries to take the writer lock;
@@ -412,6 +477,7 @@ impl Engine {
             anchors: OnceLock::new(),
             running: (Mutex::new(0), std::sync::Condvar::new()),
             splits: OnceLock::new(),
+            reach_cache: Mutex::new(HashMap::new()),
         };
         e.reload_manifest(true);
         if e.writer {
@@ -882,6 +948,12 @@ impl Engine {
         let t0 = Instant::now();
         let root = PathBuf::from(unit);
         let files = if self.is_flat_unit(unit) {
+            let uncovered = walk::non_unit_children(&self.cfg, &root);
+            let mut g = self.inner.write().unwrap();
+            if let Some(u) = g.m.units.get_mut(unit) {
+                u.uncovered = uncovered;
+            }
+            drop(g);
             walk::list_depth(&self.cfg, &root, Some(1))
         } else {
             walk::list(&self.cfg, &root)
@@ -1037,9 +1109,20 @@ impl Engine {
                     })
                     .cloned()
                     .collect();
+            let uncovered =
+                g.m.units
+                    .get(&prefix)
+                    .map(|u| {
+                        u.uncovered
+                            .iter()
+                            .map(|p| Uncovered::new(Path::new(p), "not_indexed"))
+                            .collect()
+                    })
+                    .unwrap_or_default();
             return Some(Cover {
                 units,
                 sub: String::new(),
+                uncovered,
             });
         }
         if let Some(u) = self.unit_for(g, root) {
@@ -1047,9 +1130,48 @@ impl Engine {
             return Some(Cover {
                 units: vec![u],
                 sub,
+                uncovered: vec![],
             });
         }
         None
+    }
+
+    /// Why a root strictly inside `unit` (at `sub`) is not covered, if it is
+    /// not: it lies in a secret location, or the unit's corpus walk never
+    /// reaches it (an ignored, excluded, hidden or symlinked directory on the
+    /// way, or an over-size file). `has_docs` (the index holds files below
+    /// `sub`) already proves the walk reaches it. Called without the lock.
+    fn sub_uncovered(
+        &self,
+        unit: &str,
+        sub: &str,
+        root: &Path,
+        has_docs: bool,
+        fingerprint: u64,
+    ) -> Option<&'static str> {
+        if has_docs || sub.is_empty() {
+            return None;
+        }
+        if self.secret_blocked(root) {
+            return Some("secret");
+        }
+        let key = (unit.to_string(), sub.to_string());
+        if let Some(&(fp, reaches)) = self.reach_cache.lock().unwrap().get(&key) {
+            if fp == fingerprint {
+                return (!reaches).then_some("excluded");
+            }
+        }
+        // Nothing there: the (empty) answer is exact whatever the rules say.
+        if std::fs::symlink_metadata(root).is_err() {
+            return None;
+        }
+        let reaches = walk::reaches(&self.cfg, Path::new(unit), root);
+        let mut c = self.reach_cache.lock().unwrap();
+        if c.len() >= COVER_CACHE_MAX {
+            c.clear();
+        }
+        c.insert(key, (fingerprint, reaches));
+        (!reaches).then_some("excluded")
     }
 
     fn writer_alive(&self, m: &Manifest) -> bool {
@@ -1124,10 +1246,11 @@ impl Engine {
 
         // Snapshot what the query needs under the lock (shards are shared
         // through `Arc`), then plan and verify without holding it.
-        let (srcs, sub, units, fresh, covered) = {
+        let (srcs, sub, units, fresh, covered, mut uncovered, probe) = {
             let g = self.inner.read().unwrap();
             match self.cover(&g, &root) {
                 Some(c) => {
+                    let probe = self.probe_args(&g, &c);
                     let (st, fresh) = self.statuses(&g, &c.units);
                     let mut srcs: Vec<Src> = c
                         .units
@@ -1144,14 +1267,37 @@ impl Engine {
                         })
                         .collect();
                     srcs.sort_by(|a, b| a.path.cmp(&b.path));
-                    (srcs, c.sub, st, fresh, true)
+                    (srcs, c.sub, st, fresh, true, c.uncovered, probe)
                 }
-                None => (Vec::new(), String::new(), Vec::new(), false, false),
+                None => (
+                    Vec::new(),
+                    String::new(),
+                    Vec::new(),
+                    false,
+                    false,
+                    vec![],
+                    None,
+                ),
             }
         };
+        // A root inside a unit that the unit's corpus leaves out: the index
+        // has nothing there, but a scan of the root would.
+        let excluded = probe.and_then(|(unit, sub, has, fp)| {
+            self.sub_uncovered(&unit, &sub, &root, has, fp)
+                .map(|why| Uncovered::new(&root, why))
+        });
+        let (srcs, sub, units, fresh, covered) = match excluded {
+            Some(u) => {
+                uncovered.push(u);
+                (Vec::new(), String::new(), Vec::new(), false, false)
+            }
+            None => (srcs, sub, units, fresh, covered),
+        };
+        let indexed = covered;
+        let covered = covered && uncovered.is_empty();
 
         let mut scan_list: Vec<FileEntry> = Vec::new();
-        let (srcs, backend) = if covered {
+        let (srcs, backend) = if indexed {
             (srcs, "index")
         } else if o.scan_fallback && root.is_dir() && !self.secret_blocked(&root) {
             scan_list = walk::list(&self.cfg, &root);
@@ -1164,6 +1310,9 @@ impl Engine {
                 "scan",
             )
         } else {
+            if uncovered.is_empty() {
+                uncovered.push(self.outside_reason(&root));
+            }
             return Ok(SearchResult {
                 backend: "none",
                 covered: false,
@@ -1174,9 +1323,13 @@ impl Engine {
                 truncated: false,
                 complete: false,
                 units: vec![],
+                uncovered,
                 elapsed_ms: ms(t0),
             });
         };
+        if backend == "scan" && uncovered.is_empty() {
+            uncovered.push(self.outside_reason(&root));
+        }
         let glob_ok = |unit: &Path, rel: &str| ov.is_none() || Self::glob_ok(&ov, &unit.join(rel));
         let mut cands: Vec<Cand> = Vec::new();
         for f in &scan_list {
@@ -1253,8 +1406,32 @@ impl Engine {
             truncated,
             complete: covered && fresh && !truncated,
             units,
+            uncovered,
             elapsed_ms: ms(t0),
         })
+    }
+
+    /// For a root strictly inside one unit: what [`Engine::sub_uncovered`]
+    /// needs from under the lock (unit, whether the index has files there,
+    /// the unit fingerprint). `None` for a whole unit or a split root.
+    fn probe_args(&self, g: &Inner, c: &Cover) -> Option<(String, String, bool, u64)> {
+        if c.sub.is_empty() || c.units.len() != 1 {
+            return None;
+        }
+        let u = &c.units[0];
+        let has = g.shards.get(u).is_some_and(|v| shards_have_sub(v, &c.sub));
+        let fp = g.m.units.get(u).map(|s| s.fingerprint).unwrap_or(0);
+        Some((u.clone(), c.sub.clone(), has, fp))
+    }
+
+    /// Why a root no unit contains is not covered.
+    fn outside_reason(&self, root: &Path) -> Uncovered {
+        let why = if self.secret_blocked(root) {
+            "secret"
+        } else {
+            "not_indexed"
+        };
+        Uncovered::new(root, why)
     }
 
     /// Verification threads for `n` candidates: the configured count, or
@@ -1458,9 +1635,26 @@ impl Engine {
             bytes += p.len() + ITEM_OVERHEAD;
             bytes <= o.max_result_bytes
         };
+        let excluded = {
+            let g = self.inner.read().unwrap();
+            self.cover(&g, &root).and_then(|c| self.probe_args(&g, &c))
+        }
+        .and_then(|(unit, sub, has, fp)| {
+            self.sub_uncovered(&unit, &sub, &root, has, fp)
+                .map(|why| Uncovered::new(&root, why))
+        });
+        let mut uncovered: Vec<Uncovered> = Vec::new();
         let g = self.inner.read().unwrap();
-        let (backend, covered, units, fresh) = match self.cover(&g, &root) {
+        let cover = match excluded {
+            Some(u) => {
+                uncovered.push(u);
+                None
+            }
+            None => self.cover(&g, &root),
+        };
+        let (backend, covered, units, fresh) = match cover {
             Some(c) => {
+                uncovered.extend(c.uncovered.iter().cloned());
                 let (st, fresh) = self.statuses(&g, &c.units);
                 'outer: for u in &c.units {
                     let pending = g.m.units.get(u).map(|s| &s.pending);
@@ -1502,7 +1696,7 @@ impl Engine {
                         }
                     }
                 }
-                ("index", true, st, fresh)
+                ("index", uncovered.is_empty(), st, fresh)
             }
             None if o.scan_fallback && root.is_dir() && !self.secret_blocked(&root) => {
                 for f in walk::list(&self.cfg, &root) {
@@ -1520,6 +1714,10 @@ impl Engine {
             }
             None => ("none", false, vec![], false),
         };
+        drop(g);
+        if !covered && uncovered.is_empty() {
+            uncovered.push(self.outside_reason(&root));
+        }
         files.sort();
         files.dedup();
         Ok(FilesResult {
@@ -1530,6 +1728,7 @@ impl Engine {
             truncated,
             complete: covered && fresh && !truncated,
             units,
+            uncovered,
             elapsed_ms: ms(t0),
         })
     }

@@ -124,6 +124,7 @@ pub fn search_all_roots(engine: &Engine, o: &SearchOpts) -> Result<Value, String
         truncated: false,
         complete: false,
         units: vec![],
+        uncovered: vec![],
         elapsed_ms: 0.0,
     };
     let mut seen_files: HashSet<String> = HashSet::new();
@@ -145,6 +146,7 @@ pub fn search_all_roots(engine: &Engine, o: &SearchOpts) -> Result<Value, String
             "fresh": r.fresh,
             "files": r.files.len(),
             "truncated": r.truncated,
+            "uncovered": r.uncovered,
         }));
         if backend_rank(r.backend) > backend_rank(merged.backend) {
             merged.backend = r.backend;
@@ -154,6 +156,11 @@ pub fn search_all_roots(engine: &Engine, o: &SearchOpts) -> Result<Value, String
         merged.truncated |= r.truncated;
         merged.candidates += r.candidates;
         merged.units.extend(r.units);
+        for u in r.uncovered {
+            if !merged.uncovered.contains(&u) {
+                merged.uncovered.push(u);
+            }
+        }
         for f in r.files {
             if seen_files.insert(f.clone()) {
                 merged.files.push(f);
@@ -224,6 +231,7 @@ pub fn lookup(engine: &Engine, p: &Value) -> Result<Value, String> {
             .unwrap_or_else(|| default_root(engine))]
     };
     let (mut covered, mut fresh) = (true, true);
+    let mut uncovered: Vec<Value> = Vec::new();
     let mut results = Vec::with_capacity(pats.len());
     for pat in pats {
         let mut files: Vec<String> = Vec::new();
@@ -237,6 +245,12 @@ pub fn lookup(engine: &Engine, p: &Value) -> Result<Value, String> {
             pc &= r.covered;
             pf &= r.fresh;
             pt |= r.truncated;
+            for u in &r.uncovered {
+                let u = json!(u);
+                if !uncovered.contains(&u) {
+                    uncovered.push(u);
+                }
+            }
             for f in r.files {
                 if seen.insert(f.clone()) {
                     files.push(f);
@@ -263,6 +277,7 @@ pub fn lookup(engine: &Engine, p: &Value) -> Result<Value, String> {
         "results": results,
         "roots": roots.iter().map(|r| r.to_string_lossy().into_owned()).collect::<Vec<_>>(),
         "covered": covered,
+        "uncovered": uncovered,
         "fresh": fresh,
         "elapsed_ms": t0.elapsed().as_secs_f64() * 1000.0,
     }}))

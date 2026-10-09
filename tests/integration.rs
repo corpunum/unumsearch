@@ -538,10 +538,16 @@ fn loose_files_directly_in_a_split_root_are_indexed() {
         assert!(t0.elapsed() < Duration::from_secs(20), "never fresh");
         std::thread::sleep(Duration::from_millis(50));
     }
-    // The loose file and both child units (a hidden child directory is not
-    // a unit, as before).
+    // The loose file and both child units. A hidden child directory is not
+    // a unit, as before; since v0.1.5 the answer says so (it is in the
+    // split root's corpus, so the index does not cover the whole root).
     let r = search(&split);
-    assert!(r.covered && r.complete);
+    assert!(!r.covered && !r.complete && r.fresh);
+    assert_eq!(r.uncovered.len(), 1);
+    assert_eq!(
+        r.uncovered[0].path,
+        split.join(".hidden").to_string_lossy().into_owned()
+    );
     assert_eq!(
         rels(&split, &r.files),
         vec!["_port-registry.json", "alpha/a.txt", "beta/deep/b.txt"]

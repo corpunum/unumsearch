@@ -12,7 +12,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "search",
-            "description": "Search file contents under a directory using the local index (falls back to a direct scan for unindexed directories). Literal by default; set regex=true for a regular expression. Returns matching lines with file paths and line numbers, plus index freshness.",
+            "description": "Search file contents under a directory using the local index (falls back to a direct scan for unindexed directories). Literal by default; set regex=true for a regular expression. Returns matching lines with file paths and line numbers, plus index freshness and coverage (covered=false lists the uncovered paths; a reason of \"secret\" means do not search there).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
