@@ -49,13 +49,16 @@ your own code with `python3 bench/race.py --root .` (see [See it yourself](#see-
   by default (overridable).
 - **Always fresh**: a filesystem watcher (`notify`: inotify, FSEvents, ReadDirectoryChangesW)
   marks changed files immediately; they are searched directly until the background rebuild of
-  their unit lands (typically well under a second). A periodic rescan with a size/mtime
+  their unit lands (typically well under a second). A periodic rescan with a size/change-time
   fingerprint catches anything the watcher missed. Every answer says whether it is `fresh`.
 - **Bounded resources**: a configurable build-memory budget, mmapped read-only shards (index
   pages are reclaimable page cache, not heap), compact on-disk format (delta/varint postings with
   an 8-bit next-byte mask per posting that removes most false-positive candidates).
 - **Units**: each root is indexed as a unit; a *split root* (a folder of many checkouts) makes
   each child its own unit, so a change rebuilds one checkout, not all of them.
+- **Incremental rebuilds**: a rebuild reads again only the files whose size or change time moved
+  (on several threads) and keeps the postings of everything else, so a branch switch on an
+  81k-file kernel tree is indexed again in a few seconds, not by re-reading the whole tree.
 - **One writer, many readers**: a lock file elects one writer per index directory; CLI
   invocations and MCP servers open the same index read-only and reload it when it changes.
 - **Graceful fallbacks**: a directory the index does not cover is scanned directly with the same
@@ -302,7 +305,7 @@ request surface every front-end uses.
 ## How it works
 
 - **Index**: per unit, one or more shards. A shard holds the document table (relative path, size,
-  mtime) and, for every byte trigram of the content (ASCII case-folded), a delta/varint posting
+  change time) and, for every byte trigram of the content (ASCII case-folded), a delta/varint posting
   list of documents, each with an 8-bit mask of the bytes that follow that trigram in the
   document. Shards are written to a temporary file and renamed into place, then mmapped.
 - **Queries**: the pattern is parsed with `regex-syntax` and turned into a boolean formula over
@@ -314,6 +317,13 @@ request surface every front-end uses.
   against the corpus rules (gitignore, excludes, size): churn in ignored files does not make a unit
   dirty. Changed files are searched directly until the unit's rebuild (debounced) replaces its
   shards; directory moves and ignore-file edits mark the unit not fresh until then.
+- **Rebuilds**: the unit is listed again and compared with its indexed documents (path, size,
+  change time = the later of mtime and ctime). Only new and changed files, and files an event
+  reported, are read, on up to 8 threads (one per 24 MiB of `max_memory_mb`: 4 by default), into small
+  shards; those and the surviving documents of the old shards are merged into shards of about
+  64 MB by decoding and renumbering posting lists, without reading any file. Shards with nothing
+  dropped are kept as they are, so one edit rewrites one shard. `index --force` rebuilds from
+  scratch. The new shards replace the old ones in one step, as before.
 
 ## Benchmarks
 
@@ -450,9 +460,13 @@ of 12 queries, ugrep for 11 (it has no file-size cap).
 
 ## Limitations
 
-- A unit is rebuilt as a whole when it changes (changed files are searchable immediately
-  through the overlay). Very large single units rebuild more slowly; split them with
-  `split_roots`.
+- A rebuild lists its whole unit and rewrites every shard that held a changed file (shards are
+  about 64 MB), so a rebuild of a very large unit costs a listing and a merge even for one
+  edit (changed files are searchable immediately through the overlay meanwhile). Split such
+  units with `split_roots`.
+- During a change too large for the overlay (over 2,000 files, or directories appearing and
+  vanishing, as in a big `git checkout`), answers say `fresh: false` until the rebuild lands:
+  on the kernel tree, the checkout plus a few seconds.
 - Matching is line-oriented like ripgrep without `-U`; multi-line patterns are not supported.
 - Case-insensitive matching of non-ASCII text works but gets less help from the index (non-ASCII
   trigrams are not case-folded), so it reads more candidate files.
