@@ -148,6 +148,14 @@ fn relevant(
         return Some(Change::Unknown);
     }
     let rel = walk::rel_string(unit_p, p)?;
+    // Ignore files define the corpus: editing one (even an indexed one) can
+    // add or remove any number of files, so it is never a plain file change.
+    if matches!(
+        p.file_name().and_then(|n| n.to_str()),
+        Some(".gitignore" | ".ignore" | ".rgignore")
+    ) {
+        return Some(Change::Unknown);
+    }
     if engine.is_indexed(unit, &rel) {
         return Some(Change::File(rel));
     }
@@ -253,15 +261,27 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
         let mut listings: HashMap<PathBuf, HashSet<String>> = HashMap::new();
         // Drain events for up to 200 ms.
         let deadline = Instant::now() + Duration::from_millis(200);
+        // Dirty/pending state is published to reader processes as soon as it
+        // changes (a small file write), at most once per PUBLISH_GAP while
+        // events stream in; a deferred publish goes out within the gap.
+        const PUBLISH_GAP: Duration = Duration::from_millis(5);
+        let mut deferred = false;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
-            match rx.recv_timeout(left) {
+            let wait = if deferred {
+                left.min(PUBLISH_GAP)
+            } else {
+                left
+            };
+            match rx.recv_timeout(wait) {
                 Ok(Ok(ev)) => {
                     if matches!(ev.kind, EventKind::Access(_)) {
                         continue;
                     }
                     if ev.need_rescan() {
                         engine.mark_all_dirty();
+                        changed = true;
+                        deferred = true;
                         continue;
                     }
                     for raw in &ev.paths {
@@ -284,10 +304,28 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                             changed = true;
                         }
                     }
+                    if changed {
+                        if last_publish.elapsed() >= PUBLISH_GAP {
+                            engine.publish_state();
+                            last_publish = Instant::now();
+                            changed = false;
+                            deferred = false;
+                        } else {
+                            deferred = true;
+                        }
+                    }
                 }
                 Ok(Err(_)) => {
                     // Typically a queue overflow: we no longer know what changed.
                     engine.mark_all_dirty();
+                    changed = true;
+                    deferred = true;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) if deferred && Instant::now() < deadline => {
+                    engine.publish_state();
+                    last_publish = Instant::now();
+                    changed = false;
+                    deferred = false;
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => break,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -297,7 +335,7 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
             }
         }
         // Readers (CLI, MCP) learn about pending changes from the manifest.
-        if changed && last_publish.elapsed() >= Duration::from_secs(1) {
+        if changed {
             engine.publish_state();
             last_publish = Instant::now();
             changed = false;
