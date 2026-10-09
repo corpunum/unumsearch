@@ -1,0 +1,22 @@
+[
+  [null, "TODO|FIXME", null],
+  [null, "async function \\w+", "*.js"],
+  [null, "process\\.env\\.[A-Z_]+", null],
+  [null, "import .* from '\\.\\./", "*.ts"],
+  [null, "fn\\s+main\\s*\\(", "*.rs"],
+  [null, "def \\w+\\(self", "*.py"],
+  [null, "class \\w+(Error|Exception)", null],
+  [null, "throw new Error\\(", null],
+  [null, "createServer", null],
+  [null, "README|CHANGELOG", "*.md"],
+  [null, "https?://[a-z0-9.-]+", null],
+  [null, "console\\.(log|error)\\(", null],
+  [null, "unsafe\\s*\\{", "*.rs"],
+  [null, "<title>", "*.html"],
+  [null, "SELECT .* FROM", null],
+  [null, "\\bTODO\\b", "*.md"],
+  [null, "package\\.json", null],
+  [null, "handle[A-Z]\\w*", null],
+  [null, "(get|set)[A-Z]\\w+\\(", null],
+  [null, "license", null]
+]

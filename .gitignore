@@ -1,3 +1,4 @@
 /target
 *.shard
 *.tmp
+__pycache__/

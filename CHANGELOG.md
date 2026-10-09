@@ -1,5 +1,51 @@
 # Changelog
 
+## v0.1.4 (2026-10-09) - Bounded Memory
+
+Fixes the daemon out-of-memory found while benchmarking for launch, makes large queries faster,
+and closes a coverage gap. API additive.
+
+- **Fix: the daemon could run out of memory when other processes read the corpus.** The
+  watcher's inotify mask (from the `notify` crate) includes `IN_OPEN`, so every file opened in a
+  watched directory (by ripgrep, by `unumsearch` CLI processes, by the daemon's own
+  verification) became an event in an unbounded queue. While the watch loop was busy (start-up
+  scan, a rebuild) the queue grew without limit: on 2026-10-09 a whole-tree `rg`/CLI/daemon
+  benchmark pushed the production daemon past its systemd `MemoryMax=512M` (504 MB anonymous
+  memory; it was killed four times in six minutes). Read-only events are now dropped before they
+  are queued, and the queue is bounded (16,384 events); an overflow marks every unit dirty, as a
+  kernel queue overflow already did. Reproduced with a private daemon under the same benchmark:
+  peak anonymous memory 568 MB before, about 100-120 MB after.
+- **Bounded results.** A query's returned paths and lines are limited by `max_result_mb`
+  (default 48, env `UNUMSEARCH_MAX_RESULT_MB`) as well as `max_files` / `max_matches`. Past a
+  limit, verification stops early and the answer is cut in path order (the same cut however the
+  threads ran) and reported as `truncated: true`. `all_roots` applies the limits to the merged
+  answer. In files-only mode no matched line text is kept at all.
+- **New `complete` field** on search and files results (and per pattern in `lookup`):
+  `covered && fresh && !truncated`. The existing contract is unchanged: if `complete` is false the
+  answer may be missing files.
+- **Back-pressure.** The HTTP daemon runs at most `max_concurrent_queries` (default 2) searches at
+  once and holds the slot until the reply is written; further requests wait instead of each
+  holding a full answer in memory.
+- **Faster verification.** One pool of threads per query claims candidates in blocks (it used to
+  start new threads for every 256 candidates); candidates are compact (unit + path borrowed from
+  the mmapped document table) and sorted without building absolute paths; read buffers are
+  reused; files-only checks jump straight to a matching line instead of testing every line; very large
+  candidate sets (16k or more) may use up to 16 threads when `threads = 0`. Interleaved A/B
+  against v0.1.3 on the same private index (20 agent regexes over 246k files): p50 104 to 65 ms,
+  p95 434 to 174 ms, worst query (`(get|set)[A-Z]\w+\(`, 80k matching files) 1,243 to 533 ms;
+  file sets identical.
+- **Fix: files directly inside a split root were not indexed** (for example
+  `workspaces/_port-registry.json` with `split_roots = ["workspaces"]`). A split root is now also
+  a unit of its own holding just its loose files; queries over the split root include them.
+- Files that grew past `max_file_size` after indexing are skipped during verification, as a walk
+  would skip them (they were read whole before).
+- Benchmark scripts used for the README numbers are in `bench/` (`run_private.sh`,
+  `race_bench.py`, `cold_bench.py`, `summarize.py`, `queries-agent.json`); they build a private
+  index and daemon and never touch a running one.
+- New tests: `tests/bounded.rs` (a counting allocator checks that a query matching 40,000 lines
+  stays within its result budget and that a stalled watcher does not queue read events or more
+  than a bounded number of write events), split-root loose files with a watcher.
+
 ## v0.1.3 (2026-10-09) - Trustworthy Search
 
 Correctness and security release following an external review. API additive.

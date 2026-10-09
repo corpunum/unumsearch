@@ -199,6 +199,7 @@ fn main() {
         "search" => {
             let mut o = SearchOpts {
                 regex: true,
+                max_result_bytes: cfg.max_result_bytes(),
                 ..Default::default()
             };
             let mut pos: Vec<String> = vec![];
@@ -313,6 +314,7 @@ fn main() {
                 regex: None,
                 max_files: 5000,
                 scan_fallback: true,
+                max_result_bytes: cfg.max_result_bytes(),
             };
             let mut path: Option<String> = None;
             while let Some(a) = sp.next().unwrap_or_else(|e| die(e)) {

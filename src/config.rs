@@ -183,6 +183,13 @@ pub struct Config {
     pub watch: bool,
     /// Threads used to verify candidates and walk trees (0 = auto, capped at 8).
     pub threads: usize,
+    /// Memory budget for one query's results (paths and matched lines), in
+    /// MiB. A query that would exceed it stops early and reports
+    /// `truncated: true` (and `complete: false`).
+    pub max_result_mb: u64,
+    /// Searches the daemon runs at once; further requests wait (back-pressure
+    /// bounding memory and CPU across concurrent clients).
+    pub max_concurrent_queries: usize,
 }
 
 impl Default for Config {
@@ -204,6 +211,8 @@ impl Default for Config {
             rescan_secs: 300,
             watch: true,
             threads: 0,
+            max_result_mb: 48,
+            max_concurrent_queries: 2,
         }
     }
 }
@@ -304,6 +313,9 @@ impl Config {
         if let Some(v) = var("UNUMSEARCH_MAX_FILE_SIZE").and_then(|v| v.parse().ok()) {
             self.max_file_size = v;
         }
+        if let Some(v) = var("UNUMSEARCH_MAX_RESULT_MB").and_then(|v| v.parse().ok()) {
+            self.max_result_mb = v;
+        }
     }
 
     pub fn index_dir(&self) -> PathBuf {
@@ -340,6 +352,11 @@ impl Config {
                 .parse::<std::net::IpAddr>()
                 .map(|ip| ip.is_loopback())
                 .unwrap_or(false)
+    }
+
+    /// Per-query result budget in bytes (at least 1 MiB).
+    pub fn max_result_bytes(&self) -> usize {
+        (self.max_result_mb.max(1) as usize) << 20
     }
 
     pub fn thread_count(&self) -> usize {
