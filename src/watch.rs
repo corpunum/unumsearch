@@ -24,6 +24,12 @@ use std::time::{Duration, Instant};
 
 const RECURSIVE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
+/// notify's FSEvents backend runs one stream for all watched paths and
+/// restarts it on every `watch`/`unwatch`, from "now": events that happen
+/// while it restarts are lost for every path, not just the new one. So on
+/// macOS a watch change marks every unit as needing a re-listing.
+const STREAM_RESTARTS: bool = cfg!(target_os = "macos");
+
 fn dirs_for(unit: &Path, files: &[FileEntry]) -> HashSet<PathBuf> {
     let mut dirs = HashSet::new();
     dirs.insert(unit.to_path_buf());
@@ -59,6 +65,11 @@ impl<W: Watcher> Ctx<W> {
                 if ok {
                     watched.insert(unit_p.clone());
                     added += 1;
+                    if STREAM_RESTARTS {
+                        // The restart may have dropped other units' events.
+                        // (This unit is listed again by `build`.)
+                        self.engine.mark_all_dirty();
+                    }
                 }
             }
         } else {
@@ -102,9 +113,14 @@ impl<W: Watcher> Ctx<W> {
             })
             .cloned()
             .collect();
+        let restarted = STREAM_RESTARTS && !stale.is_empty();
         for d in stale {
             let _ = w.unwatch(&d);
             watched.remove(&d);
+        }
+        drop(watched);
+        if restarted {
+            self.engine.mark_all_dirty();
         }
     }
 

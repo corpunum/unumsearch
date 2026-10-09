@@ -26,5 +26,5 @@ Exit status: JSON output exits 0 on success (also when nothing matches: check
     test "$n" -eq 0
 ```
 
-Pin a version with `UNUMSEARCH_VERSION=v0.1.5` for reproducible builds. On Windows runners use
+Pin a version with `UNUMSEARCH_VERSION=v0.1.6` for reproducible builds. On Windows runners use
 `install.ps1` (see the main README).

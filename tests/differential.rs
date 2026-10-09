@@ -437,7 +437,32 @@ fn mutating_corpora_with_a_watcher_stay_exact_and_become_fresh() {
         .unwrap_or(6);
     let mut checked_fresh = 0usize;
     for case in 0..cases {
-        let seed = seed_base() + 1_000_000 + case;
+        checked_fresh += mutation_case(&rg, seed_base() + 1_000_000 + case, 0);
+    }
+    eprintln!("differential(watch): {checked_fresh} fresh answers verified");
+}
+
+/// Issue #6: on macOS CI, seed 1024301 got a `fresh:true` answer missing a
+/// newly created file. Every rebuild there pays an `F_FULLFSYNC` per shard,
+/// which kept a rebuild running while the test queried, and a running
+/// rebuild used to hide the pending overlay. Replays that seed with every
+/// rebuild stretched by 300 ms, querying throughout, on any platform.
+#[test]
+fn seed_1024301_with_slow_rebuilds_stays_exact() {
+    let Some(rg) = rg_binary() else {
+        eprintln!("rg not found; skipping differential test");
+        return;
+    };
+    let n = mutation_case(&rg, 1_024_301, 300);
+    eprintln!("differential(watch, slow rebuilds): {n} fresh answers verified");
+}
+
+/// One watcher case: mutate a random corpus while the watcher runs, check
+/// every fresh answer against rg, then that it converges. Returns how many
+/// fresh answers were verified.
+fn mutation_case(rg: &str, seed: u64, build_stall_ms: u64) -> usize {
+    let mut checked_fresh = 0usize;
+    {
         let mut r = Rng(seed);
         let t = tempfile::tempdir().unwrap();
         let root = t.path().join("repo");
@@ -447,12 +472,13 @@ fn mutating_corpora_with_a_watcher_stay_exact_and_become_fresh() {
         let ignore_file = t.path().join("excludes.ignore");
         std::fs::write(&ignore_file, c.exclude_lines().join("\n")).unwrap();
         let env = Env {
-            rg: rg.clone(),
+            rg: rg.to_string(),
             root: root.clone(),
             ignore_file,
             max,
         };
         let e = Arc::new(Engine::open(c, true).unwrap());
+        e.set_build_stall_ms(build_stall_ms);
         let stop = Arc::new(AtomicBool::new(false));
         let (e2, s2) = (e.clone(), stop.clone());
         let h = std::thread::spawn(move || unumsearch::watch::run(e2, s2));
@@ -470,8 +496,7 @@ fn mutating_corpora_with_a_watcher_stay_exact_and_become_fresh() {
             }
             barrier(&e, &env, round);
             // While the answer claims to be fresh it must be exact.
-            for _ in 0..4 {
-                let (pat, regex, ci) = *r.pick(PATTERNS);
+            let mut check = |pat: &str, regex: bool, ci: bool| {
                 let (got, fresh) = engine_answer(&e, &env, pat, regex, ci);
                 if fresh {
                     // Re-ask ripgrep after the engine: a change landing in
@@ -489,6 +514,25 @@ fn mutating_corpora_with_a_watcher_stay_exact_and_become_fresh() {
                     }
                     checked_fresh += 1;
                 }
+            };
+            if build_stall_ms > 0 {
+                // Slow-rebuild mode: keep asking through the next drain cycle
+                // (up to 200 ms) and the stalled rebuild that follows it, so
+                // queries certainly land inside the rebuild window. Patterns
+                // cycle in order: the RNG stream (and so the case) is the
+                // same as without the stall.
+                let until = Instant::now() + Duration::from_millis(250 + build_stall_ms);
+                let mut i = 0;
+                while Instant::now() < until {
+                    let (pat, regex, ci) = PATTERNS[i % PATTERNS.len()];
+                    check(pat, regex, ci);
+                    i += 1;
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            for _ in 0..4 {
+                let (pat, regex, ci) = *r.pick(PATTERNS);
+                check(pat, regex, ci);
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
@@ -511,5 +555,5 @@ fn mutating_corpora_with_a_watcher_stay_exact_and_become_fresh() {
         stop.store(true, Ordering::Relaxed);
         let _ = h.join();
     }
-    eprintln!("differential(watch): {checked_fresh} fresh answers verified");
+    checked_fresh
 }

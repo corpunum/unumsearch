@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.1.6 (2026-10-09) - Fresh During Rebuilds
+
+Fixes a freshness bug first seen on macOS CI ([#6](https://github.com/corpunum/unumsearch/issues/6)).
+No API change; query latency unchanged.
+
+- **Fix: an answer could say `fresh: true` while missing a recently changed file, during a
+  rebuild.** A rebuild cleared the unit's dirty flag and its pending overlay (the changed files
+  that queries verify directly) when it *started*, but installed its new shards only when it
+  *finished*. A query in between was served from the old index without the overlay and still
+  claimed to be fresh. On Linux the window is a few milliseconds; on macOS each shard write ends in
+  `F_FULLFSYNC`, which on CI runners stretched it enough for the watcher differential test
+  (seed 1024301) to get `fresh: true` without `a/b/new4.txt`. Pending state now stays in force
+  until the new shards are live, and is resolved in the same locked step that swaps them in;
+  changes that arrive during the rebuild stay pending after it, as before. This affected the
+  daemon on every platform, not only the test.
+- **Fix (macOS): adding or removing a watch could drop other units' events.** notify's FSEvents
+  backend restarts its single stream on every watch change, from "now", so events for every path
+  were lost while it restarted (for example when a new checkout appeared under a split root).
+  A watch change on macOS now marks every unit for re-listing (writer-side work only; a listing
+  whose fingerprint is unchanged rebuilds nothing).
+- Tests: `tests/build_window.rs` slows rebuilds down on purpose (a test hook) and fails without
+  the fix on any platform; `seed_1024301_with_slow_rebuilds_stays_exact` replays the macOS CI
+  failure on any platform, deterministically.
+- Known gap on Windows, tracked in [#7](https://github.com/corpunum/unumsearch/issues/7): notify's
+  `ReadDirectoryChangesW` backend does not report buffer overflows to us.
+
 ## v0.1.5 (2026-10-09) - Honest Coverage
 
 Fixes a correctness gap found by replaying 1,267 real agent searches. API additive.
