@@ -375,6 +375,53 @@ private daemon, so it never touches a running one.
 [`bench/bench.py`](bench/bench.py) is a simpler single-pass version for a quick check on your own
 tree.
 
+### Branch switch: searching while `git checkout` rewrites the tree
+
+What does an agent get if it keeps searching while a checkout replaces thousands of files?
+[`bench/branch_switch.py`](bench/branch_switch.py) indexes one scratch clone with a private daemon
+(its own config, index and port), checks that daemon and rg return the same files on the idle
+tree, then switches `--from` -> `--to` -> `--from` while one client sends the queries back to back
+over HTTP. Every answer's latency and `fresh`/`complete` flags are recorded, and every answer that
+started after the checkout finished and claimed `fresh` + `complete` is compared with rg on the
+new tree. Measured 2026-10-09, v0.1.6, same machine as above (a local LLM serving throughout),
+warm cache, files-only regex queries, two directions per pair (shown as `a / b`).
+
+| Repository, switch | Files changed | Checkout | Index caught up | Answers flagged stale | p50 / p95 / max during the switch | Steady p50 / p95 | Fresh+complete answers vs rg |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| OpenUnum (JS, 1.9k files), two commits | 1,529 | 0.07 / 0.19 s | 0.9 / 1.3 s | 0.9 / 1.2 s | 1.7 / 2.8 / 6.1 ms; 2.0 / 3.7 / 9.0 ms | 0.9 / 1.2 ms | 27,669 checked, **0 wrong** |
+| Linux (81.8k files), v6.6 <-> v6.6-rc7 | 151 | 0.1 / 0.1 s | 18.4 / 18.5 s | **none** | 11 / 33 / 70 ms; 12 / 35 / 79 ms | 9.4 / 29 ms | 3,818 checked, **0 wrong** |
+| Linux, v6.6 <-> v6.5 | 14,856 | 2.8 / 1.3 s | 31.3 / 20.6 s | 31.1 / 21.3 s | 22 / 58 / 76 ms; 14 / 36 / 79 ms | 18 / 47 ms | 1,365 checked, **0 wrong** |
+| Linux, v6.6 <-> v6.1 | 44,686 | 3.0 / 2.9 s | 21.5 / 23.9 s | 21.4 / 23.6 s | 12 / 35 / 97 ms; 12 / 34 / 57 ms | 9.8 / 30 ms | 1,464 checked, **0 wrong** |
+
+- **Queries.** OpenUnum: the first 12 of [`queries-agent.json`](bench/queries-agent.json). Linux:
+  12 kernel regexes ([`queries-kernel.json`](bench/queries-kernel.json)) that match 686 to
+  17,169 files each; every answer returns all matching paths, so most of those milliseconds are
+  result size, not lookup.
+- **"Index caught up"** is checkout start until the rebuilt index is live. A repository is one
+  unit and a unit is rebuilt as a whole, so on the kernel any change costs a background rebuild
+  of 81k files (13 to 30 s here; the initial build took the same). Queries keep being answered
+  during it at about steady latency.
+- **"Flagged stale"**: up to 2,000 changed files, the daemon verifies the changed files directly
+  and answers stay `fresh` and exact (the 151-file kernel switch: no stale answers at all, 0
+  wrong). Past that, or when directories appear or vanish, answers say `fresh: false` /
+  `complete: false` until the rebuild lands, and a client should fall back to its own scan. Those
+  answers are not counted as wrong; they say so.
+- **Correctness.** Before each run all 12 queries returned exactly rg's files (rg with
+  `unumsearch excludes` as `--ignore-file`, `--hidden`, 1 MB cap). After each checkout every
+  answer marked fresh + complete was compared with rg: 0 of 34,316 differed. Answers that
+  started while `git checkout` was still writing are not checked (the tree had no single state).
+- **Memory.** Daemon peak RSS (VmHWM, with `MALLOC_ARENA_MAX=2`): 41 MB on OpenUnum, 235 MB
+  on the kernel, which includes resident pages of the 259 MB memory-mapped index.
+- **Noise.** The v6.5 run landed on a busier stretch (its steady p50 was 18 ms against 9 to 10 ms
+  in the other two runs). Shallow clones (`--depth 1` per tag); one client; one run per pair.
+
+```bash
+git clone --depth 1 --branch v6.6 https://github.com/torvalds/linux.git /tmp/linux
+git -C /tmp/linux fetch --depth 1 origin tag v6.1
+python3 bench/branch_switch.py --repo /tmp/linux --from v6.6 --to v6.1 \
+    --queries bench/queries-kernel.json --port 7799
+```
+
 ### See it yourself
 
 ```bash
