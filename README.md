@@ -12,6 +12,19 @@ query. unumsearch reads a compact trigram index instead and only opens the files
 then verifies them against the real file contents, so answers are exact and usually take a few
 milliseconds.
 
+![unumsearch vs rg vs ugrep: a live terminal race over ~180 agent worktrees](docs/media/race.gif)
+
+*Live run, real timings: 12 search patterns our agents actually issued, over ~180 agent worktrees
+(258k files), one engine at a time with a warm page cache. Nothing is replayed or sped up. Run it on
+your own code with `python3 bench/race.py --root .` (see [See it yourself](#see-it-yourself)).*
+
+<details>
+<summary>Final result card</summary>
+
+![race result: rg 4.03 s, unumsearch 217 ms (18.6x), ugrep 25.0 s; same files as rg 12/12](docs/media/race-result.png)
+
+</details>
+
 > **Use the daemon for speed.** The fast path is the running daemon (or the MCP server / `rpc`
 > process, which keep the index open). Over a 247k-file tree it answered the benchmark's 20
 > agent regexes at 64 ms p50 against 347 ms for `rg -l`; inside one 3.7k-file repository, 2.3 ms
