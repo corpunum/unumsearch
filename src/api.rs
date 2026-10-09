@@ -67,6 +67,7 @@ pub fn search_opts(engine: &Engine, p: &Value) -> Result<SearchOpts, String> {
         files_only: b(p, "files_only", false),
         candidates_only: b(p, "candidates_only", false),
         scan_fallback: b(p, "scan_fallback", true),
+        max_result_bytes: engine.cfg.max_result_bytes(),
     })
 }
 
@@ -79,6 +80,7 @@ pub fn files_opts(engine: &Engine, p: &Value) -> FilesOpts {
         regex: s(p, "regex").or_else(|| s(p, "name")),
         max_files: n(p, "max_files", 5000),
         scan_fallback: b(p, "scan_fallback", true),
+        max_result_bytes: engine.cfg.max_result_bytes(),
     }
 }
 
@@ -108,6 +110,8 @@ fn backend_rank(b: &str) -> u8 {
 /// Run one search per configured root and merge the answers: files and
 /// matches concatenated (deduplicated by path), `covered`/`fresh` only when
 /// every root's answer is, `truncated` when any is or the merged caps are hit.
+/// The caps and the result budget apply to the merged answer: each root gets
+/// what the roots before it left over.
 pub fn search_all_roots(engine: &Engine, o: &SearchOpts) -> Result<Value, String> {
     let t0 = Instant::now();
     let mut merged = SearchResult {
@@ -118,16 +122,22 @@ pub fn search_all_roots(engine: &Engine, o: &SearchOpts) -> Result<Value, String
         matches: vec![],
         candidates: 0,
         truncated: false,
+        complete: false,
         units: vec![],
         elapsed_ms: 0.0,
     };
     let mut seen_files: HashSet<String> = HashSet::new();
     let mut seen_matches: HashSet<(String, u64)> = HashSet::new();
     let mut per_root = Vec::new();
+    let mut used = 0usize;
     for root in all_roots(engine) {
         let mut ro = o.clone();
         ro.root = root.clone();
+        ro.max_files = o.max_files.saturating_sub(merged.files.len());
+        ro.max_matches = o.max_matches.saturating_sub(merged.matches.len());
+        ro.max_result_bytes = o.max_result_bytes.saturating_sub(used);
         let r = engine.search(&ro)?;
+        used += r.result_bytes();
         per_root.push(json!({
             "root": root.to_string_lossy(),
             "backend": r.backend,
@@ -163,6 +173,7 @@ pub fn search_all_roots(engine: &Engine, o: &SearchOpts) -> Result<Value, String
         merged.matches.truncate(o.max_matches);
         merged.truncated = true;
     }
+    merged.complete = merged.covered && merged.fresh && !merged.truncated;
     merged.elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
     let mut v = serde_json::to_value(&merged).map_err(|e| e.to_string())?;
     v["roots"] = Value::Array(per_root);
@@ -245,6 +256,7 @@ pub fn lookup(engine: &Engine, p: &Value) -> Result<Value, String> {
             "covered": pc,
             "fresh": pf,
             "truncated": pt,
+            "complete": pc && pf && !pt,
         }));
     }
     Ok(json!({"ok": true, "result": {

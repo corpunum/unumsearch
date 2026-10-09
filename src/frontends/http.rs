@@ -174,6 +174,8 @@ pub fn serve(engine: Arc<Engine>) {
                     );
                     continue;
                 }
+                // Held until the reply is written (see `Engine::query_slot`).
+                let _slot = engine.query_slot();
                 let reply = super::rpc::handle_line(&engine, &body, api::Scope::Confined)
                     .unwrap_or(Value::Null);
                 respond(req, 200, &reply);
@@ -184,6 +186,7 @@ pub fn serve(engine: Arc<Engine>) {
                 respond(req, 404, &json!({"ok": false, "error": "not found"}));
                 continue;
             }
+            let _slot = (method != "status").then(|| engine.query_slot());
             match api::call_scoped(&engine, method, &query_params(&url), api::Scope::Confined) {
                 Ok(v) => respond(req, 200, &v),
                 Err(e) => respond(req, 400, &json!({"ok": false, "error": e})),

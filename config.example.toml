@@ -3,7 +3,7 @@
 # (Linux: ~/.config/unumsearch/config.toml, macOS: ~/Library/Application Support/unumsearch/config.toml,
 #  Windows: %APPDATA%\unumsearch\config.toml). Environment: UNUMSEARCH_ROOTS (path-list),
 # UNUMSEARCH_SPLIT_ROOTS, UNUMSEARCH_INDEX_DIR, UNUMSEARCH_LISTEN, UNUMSEARCH_MAX_MEMORY_MB,
-# UNUMSEARCH_MAX_FILE_SIZE. Flags override both.
+# UNUMSEARCH_MAX_FILE_SIZE, UNUMSEARCH_MAX_RESULT_MB. Flags override both.
 
 # Directories to index. Each is one unit, rebuilt as a whole when it changes.
 roots = ["~/src/project-a", "~/src/checkouts"]
@@ -30,3 +30,5 @@ max_wait_ms = 10000        # upper bound under continuous changes
 rescan_secs = 300          # full rescan (catches anything the watcher missed)
 watch = true               # filesystem notifications
 threads = 0                # 0 = auto (max 8)
+max_result_mb = 48         # per-query result memory; past it the answer is truncated (complete: false)
+max_concurrent_queries = 2 # daemon searches at once; more requests wait their turn

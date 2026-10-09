@@ -160,6 +160,7 @@ fn corpus_rules_and_query_semantics() {
             regex: None,
             max_files: 100,
             scan_fallback: true,
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(
@@ -173,6 +174,7 @@ fn corpus_rules_and_query_semantics() {
             regex: Some("^uni".into()),
             max_files: 100,
             scan_fallback: true,
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(rels(&root, &f.files), vec!["unicode.txt"]);
@@ -418,6 +420,7 @@ fn pending_changes_are_searchable_before_rebuild() {
             regex: None,
             max_files: 10,
             scan_fallback: false,
+            ..Default::default()
         })
         .unwrap();
     assert_eq!(f.files.len(), 1);
@@ -458,6 +461,7 @@ fn pending_changes_are_searchable_before_rebuild() {
             regex: None,
             max_files: 1000,
             scan_fallback: false,
+            ..Default::default()
         })
         .unwrap();
     let names = rels(&root, &all.files);
@@ -499,6 +503,77 @@ fn ignored_file_churn_does_not_dirty_the_unit() {
     std::thread::sleep(Duration::from_millis(400));
     let st = e.status();
     assert_eq!(st["units_dirty"], 0, "{st}");
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    h.join().unwrap();
+}
+
+#[test]
+fn loose_files_directly_in_a_split_root_are_indexed() {
+    let t = tempfile::tempdir().unwrap();
+    let split = t.path().join("workspaces");
+    write(&split, "_port-registry.json", b"{\"loose_marker\": 1}\n");
+    write(&split, "alpha/a.txt", b"loose_marker in a unit\n");
+    write(&split, "beta/deep/b.txt", b"loose_marker deeper\n");
+    write(&split, ".hidden/h.txt", b"loose_marker hidden\n");
+    let cfg = Config {
+        split_roots: vec![split.to_string_lossy().into_owned()],
+        ..config(t.path(), &split)
+    };
+    let e = Arc::new(Engine::open(cfg, true).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let (e2, s2) = (e.clone(), stop.clone());
+    let h = std::thread::spawn(move || unumsearch::watch::run(e2, s2));
+    let search = |root: &Path| {
+        e.search(&SearchOpts {
+            pattern: "loose_marker".into(),
+            root: root.to_path_buf(),
+            files_only: true,
+            scan_fallback: false,
+            ..Default::default()
+        })
+        .unwrap()
+    };
+    let t0 = Instant::now();
+    while !(search(&split).fresh && e.status()["units"].as_array().unwrap().len() == 3) {
+        assert!(t0.elapsed() < Duration::from_secs(20), "never fresh");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // The loose file and both child units (a hidden child directory is not
+    // a unit, as before).
+    let r = search(&split);
+    assert!(r.covered && r.complete);
+    assert_eq!(
+        rels(&split, &r.files),
+        vec!["_port-registry.json", "alpha/a.txt", "beta/deep/b.txt"]
+    );
+    let f = e
+        .files(&FilesOpts {
+            root: split.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(rels(&split, &f.files).contains(&"_port-registry.json".to_string()));
+    // A child unit still answers alone, without the loose files.
+    assert_eq!(
+        rels(&split, &search(&split.join("alpha")).files),
+        vec!["alpha/a.txt"]
+    );
+    // Inside a non-unit child the index makes no claim (scan fallback territory).
+    assert!(!search(&split.join(".hidden")).covered);
+    // A new loose file is picked up by the watcher.
+    write(&split, "notes.md", b"loose_marker new\n");
+    let t1 = Instant::now();
+    loop {
+        let r = search(&split);
+        if r.fresh && rels(&split, &r.files).contains(&"notes.md".to_string()) {
+            break;
+        }
+        assert!(
+            t1.elapsed() < Duration::from_secs(20),
+            "new loose file never seen"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     h.join().unwrap();
 }

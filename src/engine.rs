@@ -122,6 +122,21 @@ pub struct Engine {
     last_gen: AtomicU64,
     /// Configured roots in both spellings (as written, canonical).
     anchors: OnceLock<Vec<(PathBuf, PathBuf)>>,
+    /// Split roots, normalised.
+    splits: OnceLock<Vec<PathBuf>>,
+    /// Queries running now (see [`Engine::query_slot`]).
+    running: (Mutex<usize>, std::sync::Condvar),
+}
+
+/// A held query slot; dropping it lets a waiting query run.
+pub struct QuerySlot<'a>(&'a Engine);
+
+impl Drop for QuerySlot<'_> {
+    fn drop(&mut self) {
+        let (m, cv) = &self.0.running;
+        *m.lock().unwrap() -= 1;
+        cv.notify_one();
+    }
 }
 
 /// Test hook: make shard writes fail (simulates a full or failing disk).
@@ -157,6 +172,9 @@ pub struct SearchOpts {
     pub candidates_only: bool,
     /// When the root is not covered by the index, walk and scan it instead.
     pub scan_fallback: bool,
+    /// Memory budget for the returned paths and lines; past it the answer is
+    /// cut (deterministically, in path order) and marked truncated.
+    pub max_result_bytes: usize,
 }
 
 impl Default for SearchOpts {
@@ -172,6 +190,7 @@ impl Default for SearchOpts {
             files_only: false,
             candidates_only: false,
             scan_fallback: true,
+            max_result_bytes: DEFAULT_RESULT_BYTES,
         }
     }
 }
@@ -193,6 +212,9 @@ pub struct SearchResult {
     pub matches: Vec<Match>,
     pub candidates: usize,
     pub truncated: bool,
+    /// `covered && fresh && !truncated`: the answer is exactly what a full
+    /// scan of the root would return now.
+    pub complete: bool,
     pub units: Vec<UnitStatus>,
     pub elapsed_ms: f64,
 }
@@ -205,6 +227,8 @@ pub struct FilesOpts {
     pub regex: Option<String>,
     pub max_files: usize,
     pub scan_fallback: bool,
+    /// Memory budget for the returned paths (see [`SearchOpts`]).
+    pub max_result_bytes: usize,
 }
 
 impl Default for FilesOpts {
@@ -215,6 +239,7 @@ impl Default for FilesOpts {
             regex: None,
             max_files: 5000,
             scan_fallback: true,
+            max_result_bytes: DEFAULT_RESULT_BYTES,
         }
     }
 }
@@ -226,8 +251,124 @@ pub struct FilesResult {
     pub fresh: bool,
     pub files: Vec<String>,
     pub truncated: bool,
+    /// `covered && fresh && !truncated` (see [`SearchResult::complete`]).
+    pub complete: bool,
     pub units: Vec<UnitStatus>,
     pub elapsed_ms: f64,
+}
+
+impl SearchResult {
+    /// What this answer counts against a result budget.
+    pub fn result_bytes(&self) -> usize {
+        let files: usize = self.files.iter().map(|f| f.len() + ITEM_OVERHEAD).sum();
+        let lines: usize = self
+            .matches
+            .iter()
+            .map(|m| m.path.len() + m.text.len() + ITEM_OVERHEAD)
+            .sum();
+        if self.matches.is_empty() {
+            files
+        } else {
+            lines
+        }
+    }
+}
+
+/// Default per-query result budget (the `max_result_mb` default).
+pub const DEFAULT_RESULT_BYTES: usize = 48 << 20;
+
+/// Bytes a returned path or line costs beyond its text (String header,
+/// allocator slack, JSON quoting), for the result budget.
+const ITEM_OVERHEAD: usize = 48;
+
+/// Candidate count from which verification may use more threads.
+const BIG_VERIFY: usize = 16 * 1024;
+
+/// Candidates a verification worker claims at a time.
+const VERIFY_BLOCK: usize = 16;
+
+/// One candidate file: a unit (index into the covering roots) and a path
+/// relative to it, borrowed from the mmapped document table when it comes
+/// from the index. Kept compact so a query whose candidates are most of the
+/// corpus does not hold an absolute `PathBuf` per file.
+struct Cand<'a> {
+    unit: u32,
+    rel: std::borrow::Cow<'a, str>,
+}
+
+/// A source of candidates: a unit's path, its shards and its pending
+/// (changed since build) files, snapshotted under the lock.
+struct Src {
+    path: PathBuf,
+    shards: Option<Arc<Vec<Shard>>>,
+    pending: Vec<String>,
+}
+
+/// Order of '/'-separated relative paths that equals `Path` component order
+/// (what sorting absolute `PathBuf`s gave before): '/' sorts below every byte.
+fn rel_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+    let (x, y) = (a.as_bytes(), b.as_bytes());
+    match x.iter().zip(y).position(|(p, q)| p != q) {
+        None => x.len().cmp(&y.len()),
+        Some(i) => {
+            let k = |c: u8| if c == b'/' { 0u16 } else { c as u16 + 1 };
+            k(x[i]).cmp(&k(y[i]))
+        }
+    }
+}
+
+/// What verification found in one file.
+enum Hit {
+    File(String),
+    Lines(Vec<Match>),
+}
+
+/// Read `p` into `buf` if it is at most `cap` bytes (the corpus size cap: a
+/// file that grew past it is skipped, as a walk would skip it). The buffer is
+/// reused across files.
+fn read_capped(p: &Path, cap: u64, buf: &mut Vec<u8>) -> bool {
+    use std::io::Read;
+    buf.clear();
+    let Ok(f) = File::open(p) else { return false };
+    let hint = f.metadata().map(|m| m.len()).unwrap_or(0);
+    if hint > cap {
+        return false;
+    }
+    buf.reserve(hint as usize + 1);
+    match f.take(cap + 1).read_to_end(buf) {
+        Ok(_) => buf.len() as u64 <= cap,
+        Err(_) => false,
+    }
+}
+
+/// Does any line of `buf` match (the same answer as testing every line, as
+/// the per-line loop does)? The whole-buffer search jumps straight to a
+/// candidate line; only that line is then confirmed.
+fn file_has_match(re: &regex::bytes::Regex, buf: &[u8]) -> bool {
+    // The earliest end of any match costs about what `is_match` does (no
+    // search for the start); the line holding that end is the candidate.
+    let Some(e) = re.shortest_match(buf) else {
+        return false;
+    };
+    let at = e.saturating_sub(1).min(buf.len().saturating_sub(1));
+    let start = buf[..at]
+        .iter()
+        .rposition(|b| *b == b'\n')
+        .map_or(0, |i| i + 1);
+    let end = buf[at..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(buf.len(), |i| at + i);
+    let line = &buf[start..end];
+    if re.is_match(line.strip_suffix(b"\r").unwrap_or(line)) {
+        return true;
+    }
+    // The buffer-level match was not a line-level one (it spans a newline,
+    // or depends on `\r` / buffer edges): fall back to every line.
+    buf.split(|b| *b == b'\n').any(|line| {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        re.is_match(line)
+    })
 }
 
 struct Cover {
@@ -269,6 +410,8 @@ impl Engine {
             doc_sets: Mutex::new(HashMap::new()),
             last_gen: AtomicU64::new(now_ms()),
             anchors: OnceLock::new(),
+            running: (Mutex::new(0), std::sync::Condvar::new()),
+            splits: OnceLock::new(),
         };
         e.reload_manifest(true);
         if e.writer {
@@ -362,6 +505,21 @@ impl Engine {
             }
         }
         Ok(())
+    }
+
+    /// Wait for one of `max_concurrent_queries` slots. A server holds one
+    /// while it runs a query and builds its reply, so at most that many
+    /// answers are in memory at once; further requests queue (back-pressure)
+    /// instead of piling up results.
+    pub fn query_slot(&self) -> QuerySlot<'_> {
+        let limit = self.cfg.max_concurrent_queries.max(1);
+        let (m, cv) = &self.running;
+        let mut n = m.lock().unwrap();
+        while *n >= limit {
+            n = cv.wait(n).unwrap();
+        }
+        *n += 1;
+        QuerySlot(self)
     }
 
     pub fn is_writer(&self) -> bool {
@@ -482,7 +640,16 @@ impl Engine {
     }
 
     fn is_split(&self, p: &Path) -> bool {
-        self.cfg.split_paths().iter().any(|s| s == p)
+        self.splits
+            .get_or_init(|| self.cfg.split_paths())
+            .iter()
+            .any(|s| s == p)
+    }
+
+    /// Is `unit` a split root? Its unit holds only the files directly inside
+    /// it (each child directory is a unit of its own).
+    pub fn is_flat_unit(&self, unit: &str) -> bool {
+        self.is_split(Path::new(unit))
     }
 
     /// Units that should exist right now, from the configured roots.
@@ -493,8 +660,9 @@ impl Engine {
             if !root.is_dir() {
                 continue;
             }
+            // A split root is a unit too, for the files directly inside it.
+            out.push(path_str(&root));
             if !splits.contains(&root) {
-                out.push(path_str(&root));
                 continue;
             }
             if let Ok(rd) = std::fs::read_dir(&root) {
@@ -557,12 +725,17 @@ impl Engine {
         self.inner.read().unwrap().m.units.keys().cloned().collect()
     }
 
-    /// Longest unit containing `p` (or equal to it).
+    /// Longest unit containing `p` (or equal to it). A split root's own unit
+    /// holds only its loose files, so it contains `p` only when `p` is the
+    /// split root or a file (not a directory) directly inside it.
     fn unit_for(&self, g: &Inner, p: &Path) -> Option<String> {
         let mut cur = Some(p);
         while let Some(c) = cur {
             let s = path_str(c);
             if g.m.units.contains_key(&s) {
+                if c != p && self.is_split(c) && (p.parent() != Some(c) || p.is_dir()) {
+                    return None;
+                }
                 return Some(s);
             }
             cur = c.parent();
@@ -708,7 +881,11 @@ impl Engine {
         };
         let t0 = Instant::now();
         let root = PathBuf::from(unit);
-        let files = walk::list(&self.cfg, &root);
+        let files = if self.is_flat_unit(unit) {
+            walk::list_depth(&self.cfg, &root, Some(1))
+        } else {
+            walk::list(&self.cfg, &root)
+        };
         let fp = walk::fingerprint(&files);
         let shards_ok = prev_shards.iter().all(|s| self.dir.join(s).exists());
         if !force && fp == prev_fp && shards_ok && (!prev_shards.is_empty() || files.is_empty()) {
@@ -846,21 +1023,16 @@ impl Engine {
     }
 
     fn cover(&self, g: &Inner, root: &Path) -> Option<Cover> {
-        if let Some(u) = self.unit_for(g, root) {
-            let sub = walk::rel_string(Path::new(&u), root).unwrap_or_default();
-            return Some(Cover {
-                units: vec![u],
-                sub,
-            });
-        }
-        // A split root is exactly the union of its child units.
+        // A split root is exactly the union of its child units and its own
+        // unit (the files directly inside it).
         if self.is_split(root) {
             let prefix = path_str(root);
             let units =
                 g.m.units
                     .keys()
                     .filter(|k| {
-                        Path::new(k).parent().map(|p| p == root).unwrap_or(false)
+                        **k == prefix
+                            || Path::new(k).parent().map(|p| p == root).unwrap_or(false)
                             || k.starts_with(&(prefix.clone() + "/"))
                     })
                     .cloned()
@@ -868,6 +1040,13 @@ impl Engine {
             return Some(Cover {
                 units,
                 sub: String::new(),
+            });
+        }
+        if let Some(u) = self.unit_for(g, root) {
+            let sub = walk::rel_string(Path::new(&u), root).unwrap_or_default();
+            return Some(Cover {
+                units: vec![u],
+                sub,
             });
         }
         None
@@ -943,65 +1122,47 @@ impl Engine {
             .map_err(|e| e.to_string())?;
         let ov = Self::overrides(&root, &o.globs)?;
 
-        let (cands, units, fresh, covered) = {
+        // Snapshot what the query needs under the lock (shards are shared
+        // through `Arc`), then plan and verify without holding it.
+        let (srcs, sub, units, fresh, covered) = {
             let g = self.inner.read().unwrap();
             match self.cover(&g, &root) {
                 Some(c) => {
                     let (st, fresh) = self.statuses(&g, &c.units);
-                    let mut cands = Vec::new();
-                    for u in &c.units {
-                        // Files changed since the last build are verified
-                        // directly, whatever the (stale) index says.
-                        if let Some(st) = g.m.units.get(u) {
-                            for rel in &st.pending {
-                                if !in_sub(&c.sub, rel) {
-                                    continue;
-                                }
-                                let abs = Path::new(u).join(rel);
-                                if self.overlay_file_ok(&abs) && Self::glob_ok(&ov, &abs) {
-                                    cands.push(abs);
-                                }
-                            }
-                        }
-                        let Some(shards) = g.shards.get(u) else {
-                            continue;
-                        };
-                        for s in shards.iter() {
-                            let ids: Box<dyn Iterator<Item = usize>> = match s.eval(&plan) {
-                                Some(v) => Box::new(v.into_iter().map(|x| x as usize)),
-                                None => Box::new(0..s.ndocs()),
-                            };
-                            for id in ids {
-                                let Some(d) = s.doc(id) else { continue };
-                                if !c.sub.is_empty()
-                                    && d.rel != c.sub
-                                    && !d.rel.starts_with(&(c.sub.clone() + "/"))
-                                {
-                                    continue;
-                                }
-                                let abs = Path::new(u).join(d.rel);
-                                if Self::glob_ok(&ov, &abs) {
-                                    cands.push(abs);
-                                }
-                            }
-                        }
-                    }
-                    (cands, st, fresh, true)
+                    let mut srcs: Vec<Src> = c
+                        .units
+                        .iter()
+                        .map(|u| Src {
+                            path: PathBuf::from(u),
+                            shards: g.shards.get(u).cloned(),
+                            pending: g
+                                .m
+                                .units
+                                .get(u)
+                                .map(|st| st.pending.iter().cloned().collect())
+                                .unwrap_or_default(),
+                        })
+                        .collect();
+                    srcs.sort_by(|a, b| a.path.cmp(&b.path));
+                    (srcs, c.sub, st, fresh, true)
                 }
-                None => (Vec::new(), Vec::new(), false, false),
+                None => (Vec::new(), String::new(), Vec::new(), false, false),
             }
         };
 
-        let (mut cands, backend) = if covered {
-            (cands, "index")
+        let mut scan_list: Vec<FileEntry> = Vec::new();
+        let (srcs, backend) = if covered {
+            (srcs, "index")
         } else if o.scan_fallback && root.is_dir() && !self.secret_blocked(&root) {
-            let files = walk::list(&self.cfg, &root);
-            let c = files
-                .into_iter()
-                .map(|f| root.join(f.rel))
-                .filter(|p| Self::glob_ok(&ov, p))
-                .collect();
-            (c, "scan")
+            scan_list = walk::list(&self.cfg, &root);
+            (
+                vec![Src {
+                    path: root.clone(),
+                    shards: None,
+                    pending: vec![],
+                }],
+                "scan",
+            )
         } else {
             return Ok(SearchResult {
                 backend: "none",
@@ -1011,110 +1172,254 @@ impl Engine {
                 matches: vec![],
                 candidates: 0,
                 truncated: false,
+                complete: false,
                 units: vec![],
                 elapsed_ms: ms(t0),
             });
         };
-        cands.sort();
-        cands.dedup();
-        let ncand = cands.len();
-
-        if o.candidates_only {
-            let truncated = cands.len() > o.max_files;
-            cands.truncate(o.max_files);
-            return Ok(SearchResult {
-                backend,
-                covered,
-                fresh: fresh || backend == "scan",
-                files: cands.iter().map(|p| path_str(p)).collect(),
-                matches: vec![],
-                candidates: ncand,
-                truncated,
-                units,
-                elapsed_ms: ms(t0),
-            });
+        let glob_ok = |unit: &Path, rel: &str| ov.is_none() || Self::glob_ok(&ov, &unit.join(rel));
+        let mut cands: Vec<Cand> = Vec::new();
+        for f in &scan_list {
+            if glob_ok(&root, &f.rel) {
+                cands.push(Cand {
+                    unit: 0,
+                    rel: std::borrow::Cow::Borrowed(f.rel.as_str()),
+                });
+            }
         }
+        for (ui, src) in srcs.iter().enumerate() {
+            let ui = ui as u32;
+            // Files changed since the last build are verified directly,
+            // whatever the (stale) index says.
+            for rel in &src.pending {
+                if !in_sub(&sub, rel) {
+                    continue;
+                }
+                let abs = src.path.join(rel);
+                if self.overlay_file_ok(&abs) && Self::glob_ok(&ov, &abs) {
+                    cands.push(Cand {
+                        unit: ui,
+                        rel: std::borrow::Cow::Borrowed(rel.as_str()),
+                    });
+                }
+            }
+            let Some(shards) = &src.shards else { continue };
+            for s in shards.iter() {
+                let mut take = |id: usize| {
+                    let Some(d) = s.doc(id) else { return };
+                    if in_sub(&sub, d.rel) && glob_ok(&src.path, d.rel) {
+                        cands.push(Cand {
+                            unit: ui,
+                            rel: std::borrow::Cow::Borrowed(d.rel),
+                        });
+                    }
+                };
+                match s.eval(&plan) {
+                    Some(v) => v.into_iter().for_each(|x| take(x as usize)),
+                    None => (0..s.ndocs()).for_each(&mut take),
+                }
+            }
+        }
+        cands.sort_unstable_by(|a, b| a.unit.cmp(&b.unit).then_with(|| rel_cmp(&a.rel, &b.rel)));
+        cands.dedup_by(|a, b| a.unit == b.unit && a.rel == b.rel);
+        let ncand = cands.len();
+        let paths: Vec<&Path> = srcs.iter().map(|s| s.path.as_path()).collect();
+        let fresh = fresh || backend == "scan";
 
-        let (files, matches, truncated) = self.verify(&cands, &re, o);
+        let (files, matches, truncated) = if o.candidates_only {
+            let mut files = Vec::new();
+            let mut bytes = 0usize;
+            let mut truncated = false;
+            for c in &cands {
+                let p = path_str(&paths[c.unit as usize].join(&*c.rel));
+                bytes += p.len() + ITEM_OVERHEAD;
+                if files.len() >= o.max_files || bytes > o.max_result_bytes {
+                    truncated = true;
+                    break;
+                }
+                files.push(p);
+            }
+            (files, vec![], truncated)
+        } else {
+            self.verify(&paths, &cands, &re, o)
+        };
         Ok(SearchResult {
             backend,
             covered,
-            fresh: fresh || backend == "scan",
+            fresh,
             files,
             matches,
             candidates: ncand,
             truncated,
+            complete: covered && fresh && !truncated,
             units,
             elapsed_ms: ms(t0),
         })
     }
 
+    /// Verification threads for `n` candidates: the configured count, or
+    /// (auto) up to 8, and up to 16 when the candidates are a large share of
+    /// a big corpus (reading them dominates; small queries gain nothing from
+    /// more threads but their start-up cost).
+    fn verify_threads(&self, n: usize) -> usize {
+        if self.cfg.threads > 0 {
+            return self.cfg.threads;
+        }
+        let avail = std::thread::available_parallelism().map_or(2, |n| n.get());
+        if n >= BIG_VERIFY {
+            avail.min(16)
+        } else {
+            avail.min(8)
+        }
+    }
+
     /// Read candidates and keep real matches, line by line like ripgrep.
+    ///
+    /// A fixed pool of workers claims blocks of candidates in path order, so
+    /// the files examined always form a prefix of the candidate list. Workers
+    /// stop once that prefix already holds more than the caps allow (files,
+    /// matches, or result bytes); the answer is then cut in path order, so it
+    /// is the same however the threads were scheduled, and marked truncated.
     fn verify(
         &self,
-        cands: &[PathBuf],
+        roots: &[&Path],
+        cands: &[Cand],
         re: &regex::bytes::Regex,
         o: &SearchOpts,
     ) -> (Vec<String>, Vec<Match>, bool) {
-        let threads = self.cfg.thread_count();
+        let n = cands.len();
+        let threads = self.verify_threads(n).min(n.div_ceil(VERIFY_BLOCK)).max(1);
+        let cap = self.cfg.max_file_size;
+        let next = AtomicUsize::new(0);
+        let stop = AtomicBool::new(false);
+        let (found_files, found_matches, found_bytes) = (
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+            AtomicUsize::new(0),
+        );
+        let hits: Mutex<Vec<(usize, Hit)>> = Mutex::new(Vec::new());
+        let work = || {
+            let mut buf = Vec::new();
+            let mut local: Vec<(usize, Hit)> = Vec::new();
+            while !stop.load(Ordering::Relaxed) {
+                let start = next.fetch_add(VERIFY_BLOCK, Ordering::Relaxed);
+                if start >= n {
+                    break;
+                }
+                let (mut nf, mut nm, mut nb) = (0usize, 0usize, 0usize);
+                for (i, c) in cands
+                    .iter()
+                    .enumerate()
+                    .take((start + VERIFY_BLOCK).min(n))
+                    .skip(start)
+                {
+                    let p = roots[c.unit as usize].join(&*c.rel);
+                    if !read_capped(&p, cap, &mut buf) || memchr0(&buf) {
+                        continue;
+                    }
+                    if o.files_only {
+                        if file_has_match(re, &buf) {
+                            let ps = path_str(&p);
+                            nf += 1;
+                            nb += ps.len() + ITEM_OVERHEAD;
+                            local.push((i, Hit::File(ps)));
+                        }
+                        continue;
+                    }
+                    if !re.is_match(&buf) {
+                        continue;
+                    }
+                    let ps = path_str(&p);
+                    let mut ms = Vec::new();
+                    let mut b = 0usize;
+                    for (ln, line) in buf.split(|b| *b == b'\n').enumerate() {
+                        let line = line.strip_suffix(b"\r").unwrap_or(line);
+                        if re.is_match(line) {
+                            let text =
+                                String::from_utf8_lossy(&line[..line.len().min(2000)]).into_owned();
+                            b += ps.len() + text.len() + ITEM_OVERHEAD;
+                            ms.push(Match {
+                                path: ps.clone(),
+                                line: ln as u64 + 1,
+                                text,
+                            });
+                            // More than the caps can never be returned.
+                            if ms.len() > o.max_matches || b > o.max_result_bytes {
+                                break;
+                            }
+                        }
+                    }
+                    if !ms.is_empty() {
+                        nf += 1;
+                        nm += ms.len();
+                        nb += b;
+                        local.push((i, Hit::Lines(ms)));
+                    }
+                }
+                if !local.is_empty() {
+                    hits.lock().unwrap().append(&mut local);
+                }
+                let tf = found_files.fetch_add(nf, Ordering::Relaxed) + nf;
+                let tm = found_matches.fetch_add(nm, Ordering::Relaxed) + nm;
+                let tb = found_bytes.fetch_add(nb, Ordering::Relaxed) + nb;
+                if tf > o.max_files || tm > o.max_matches || tb > o.max_result_bytes {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+        };
+        if threads == 1 {
+            work();
+        } else {
+            std::thread::scope(|sc| {
+                for _ in 0..threads {
+                    sc.spawn(work);
+                }
+            });
+        }
+        let mut r = hits.into_inner().unwrap();
+        r.sort_unstable_by_key(|(i, _)| *i);
         let mut files = Vec::new();
         let mut matches = Vec::new();
         let mut truncated = false;
-        let block = 256.max(threads * 16);
-        for chunk in cands.chunks(block) {
-            let next = AtomicUsize::new(0);
-            let results: Mutex<Vec<(usize, Vec<Match>)>> = Mutex::new(Vec::new());
-            std::thread::scope(|sc| {
-                for _ in 0..threads.min(chunk.len()) {
-                    sc.spawn(|| loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= chunk.len() {
+        let mut bytes = 0usize;
+        for (_, hit) in r {
+            if files.len() >= o.max_files || matches.len() >= o.max_matches {
+                truncated = true;
+                break;
+            }
+            match hit {
+                Hit::File(p) => {
+                    bytes += p.len() + ITEM_OVERHEAD;
+                    if bytes > o.max_result_bytes {
+                        truncated = true;
+                        break;
+                    }
+                    files.push(p);
+                }
+                Hit::Lines(ms) => {
+                    let room = o.max_matches - matches.len();
+                    let mut take = 0;
+                    for m in ms.iter().take(room) {
+                        let b = m.path.len() + m.text.len() + ITEM_OVERHEAD;
+                        if bytes + b > o.max_result_bytes {
                             break;
                         }
-                        let p = &chunk[i];
-                        let Ok(buf) = std::fs::read(p) else { continue };
-                        if memchr0(&buf) || !re.is_match(&buf) {
-                            continue;
-                        }
-                        let mut ms = Vec::new();
-                        for (n, line) in buf.split(|b| *b == b'\n').enumerate() {
-                            let line = line.strip_suffix(b"\r").unwrap_or(line);
-                            if re.is_match(line) {
-                                ms.push(Match {
-                                    path: path_str(p),
-                                    line: n as u64 + 1,
-                                    text: String::from_utf8_lossy(&line[..line.len().min(2000)])
-                                        .into_owned(),
-                                });
-                                if o.files_only {
-                                    break;
-                                }
-                            }
-                        }
-                        if !ms.is_empty() {
-                            results.lock().unwrap().push((i, ms));
-                        }
-                    });
-                }
-            });
-            let mut r = results.into_inner().unwrap();
-            r.sort_by_key(|(i, _)| *i);
-            for (_, ms) in r {
-                if files.len() >= o.max_files || matches.len() >= o.max_matches {
-                    truncated = true;
-                    break;
-                }
-                files.push(ms[0].path.clone());
-                if !o.files_only {
-                    let room = o.max_matches - matches.len();
-                    if ms.len() > room {
+                        bytes += b;
+                        take += 1;
+                    }
+                    if take == 0 {
+                        truncated = true;
+                        break;
+                    }
+                    if take < ms.len() {
                         truncated = true;
                     }
-                    matches.extend(ms.into_iter().take(room));
+                    files.push(ms[0].path.clone());
+                    matches.extend(ms.into_iter().take(take));
+                    if truncated {
+                        break;
+                    }
                 }
-            }
-            if truncated {
-                break;
             }
         }
         (files, matches, truncated)
@@ -1147,6 +1452,12 @@ impl Engine {
         };
         let mut files = Vec::new();
         let mut truncated = false;
+        let mut bytes = 0usize;
+        // Room for one more path (both caps), or the answer is truncated.
+        let mut room = |p: &str| {
+            bytes += p.len() + ITEM_OVERHEAD;
+            bytes <= o.max_result_bytes
+        };
         let g = self.inner.read().unwrap();
         let (backend, covered, units, fresh) = match self.cover(&g, &root) {
             Some(c) => {
@@ -1157,11 +1468,12 @@ impl Engine {
                     for rel in pending.into_iter().flatten() {
                         let abs = Path::new(u).join(rel);
                         if in_sub(&c.sub, rel) && self.overlay_file_ok(&abs) && keep(&abs) {
-                            if files.len() >= o.max_files {
+                            let ps = path_str(&abs);
+                            if files.len() >= o.max_files || !room(&ps) {
                                 truncated = true;
                                 break 'outer;
                             }
-                            files.push(path_str(&abs));
+                            files.push(ps);
                         }
                     }
                     let Some(shards) = g.shards.get(u) else {
@@ -1180,11 +1492,12 @@ impl Engine {
                             }
                             let abs = Path::new(u).join(d.rel);
                             if keep(&abs) {
-                                if files.len() >= o.max_files {
+                                let ps = path_str(&abs);
+                                if files.len() >= o.max_files || !room(&ps) {
                                     truncated = true;
                                     break 'outer;
                                 }
-                                files.push(path_str(&abs));
+                                files.push(ps);
                             }
                         }
                     }
@@ -1195,11 +1508,12 @@ impl Engine {
                 for f in walk::list(&self.cfg, &root) {
                     let abs = root.join(&f.rel);
                     if keep(&abs) {
-                        if files.len() >= o.max_files {
+                        let ps = path_str(&abs);
+                        if files.len() >= o.max_files || !room(&ps) {
                             truncated = true;
                             break;
                         }
-                        files.push(path_str(&abs));
+                        files.push(ps);
                     }
                 }
                 ("scan", false, vec![], true)
@@ -1214,6 +1528,7 @@ impl Engine {
             fresh,
             files,
             truncated,
+            complete: covered && fresh && !truncated,
             units,
             elapsed_ms: ms(t0),
         })

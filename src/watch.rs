@@ -90,7 +90,10 @@ impl<W: Watcher> Ctx<W> {
             .filter(|d| {
                 let mut cur = Some(d.as_path());
                 while let Some(c) = cur {
-                    if units.contains(&c.to_string_lossy().into_owned()) {
+                    let k = c.to_string_lossy().into_owned();
+                    // A split root's unit covers only the root directory
+                    // itself, not what used to be a child unit below it.
+                    if units.contains(&k) && (c == d.as_path() || !self.engine.is_flat_unit(&k)) {
                         return false;
                     }
                     cur = c.parent();
@@ -183,7 +186,12 @@ fn relevant(
         }
     }
     // A new directory may hold any number of files: rebuild before trusting.
+    // (Not for a split root's own unit: its child directories are units of
+    // their own, found by the unit scan.)
     if p.is_dir() {
+        if engine.is_flat_unit(unit) {
+            return None;
+        }
         Some(Change::Unknown)
     } else {
         Some(Change::File(rel))
@@ -218,13 +226,44 @@ impl Aliases {
     }
 }
 
+/// Test hook: make every loop iteration sleep this long first (simulates a
+/// loop busy with long rebuilds while events keep arriving).
+#[doc(hidden)]
+pub static STALL_LOOP_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Most events the watcher may hold in its queue (each is a few hundred bytes).
+const EVENT_QUEUE: usize = 16 * 1024;
+
+/// Opens, closes and reads change nothing (writes are reported as `Modify`;
+/// a close-after-write was never acted on either). A rescan request is kept
+/// whatever its kind.
+fn is_read_only(ev: &notify::Event) -> bool {
+    matches!(ev.kind, EventKind::Access(_)) && !ev.need_rescan()
+}
+
 /// Run the writer loop until `stop` is set: initial index, then watch,
 /// debounce-rebuild and periodic rescans. Blocks the calling thread.
 pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
-    let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
+    // Bounded: the watcher thread never queues more than EVENT_QUEUE events
+    // while this loop is busy (a rebuild, a rescan). Read-only events are
+    // dropped before queueing: inotify reports every `open()` of a file in a
+    // watched directory, so any process reading the corpus (ripgrep, the CLI,
+    // this daemon's own verification) used to flood an unbounded queue (the
+    // 2026-10-09 OOM). An overflow is handled like a kernel queue overflow:
+    // every unit is marked dirty and re-listed.
+    let (tx, rx) = mpsc::sync_channel::<notify::Result<notify::Event>>(EVENT_QUEUE);
+    let overflow = Arc::new(AtomicBool::new(false));
+    let overflow_cb = overflow.clone();
     let watcher = if engine.cfg.watch {
-        match notify::recommended_watcher(move |res| {
-            let _ = tx.send(res);
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+            if let Ok(ev) = &res {
+                if is_read_only(ev) {
+                    return;
+                }
+            }
+            if let Err(mpsc::TrySendError::Full(_)) = tx.try_send(res) {
+                overflow_cb.store(true, Ordering::Relaxed);
+            }
         }) {
             Ok(w) => Some(w),
             Err(e) => {
@@ -257,6 +296,10 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
     let mut changed = false;
 
     while !stop.load(Ordering::Relaxed) {
+        let stall = STALL_LOOP_MS.load(Ordering::Relaxed);
+        if stall > 0 {
+            std::thread::sleep(Duration::from_millis(stall));
+        }
         // Directory listings are cached for one drain cycle only.
         let mut listings: HashMap<PathBuf, HashSet<String>> = HashMap::new();
         // Drain events for up to 200 ms.
@@ -267,6 +310,11 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
         const PUBLISH_GAP: Duration = Duration::from_millis(5);
         let mut deferred = false;
         loop {
+            if overflow.swap(false, Ordering::Relaxed) {
+                engine.mark_all_dirty();
+                changed = true;
+                deferred = true;
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             let wait = if deferred {
                 left.min(PUBLISH_GAP)
@@ -275,7 +323,7 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
             };
             match rx.recv_timeout(wait) {
                 Ok(Ok(ev)) => {
-                    if matches!(ev.kind, EventKind::Access(_)) {
+                    if is_read_only(&ev) {
                         continue;
                     }
                     if ev.need_rescan() {
@@ -358,5 +406,22 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
             engine.heartbeat();
             last_beat = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{AccessKind, AccessMode, Flag, ModifyKind};
+
+    #[test]
+    fn reads_are_dropped_writes_and_rescans_kept() {
+        let open = notify::Event::new(EventKind::Access(AccessKind::Open(AccessMode::Any)));
+        assert!(is_read_only(&open));
+        let close = notify::Event::new(EventKind::Access(AccessKind::Close(AccessMode::Read)));
+        assert!(is_read_only(&close));
+        assert!(!is_read_only(&open.clone().set_flag(Flag::Rescan)));
+        let modify = notify::Event::new(EventKind::Modify(ModifyKind::Any));
+        assert!(!is_read_only(&modify));
     }
 }

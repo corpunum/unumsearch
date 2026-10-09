@@ -13,11 +13,11 @@ then verifies them against the real file contents, so answers are exact and usua
 milliseconds.
 
 > **Use the daemon for speed.** The fast path is the running daemon (or the MCP server / `rpc`
-> process, which keep the index open): queries take about 1 ms at the median. A *new CLI process
-> per query* pays process start and index open each time (about 21 ms p50 in the benchmark
-> below) and is **slower than `rg` at the median on trees `rg` can scan quickly** (rg 6.9 ms p50
-> versus 21 ms). The index wins on tail latency (p95 30-40 ms vs 388 ms) and on big trees, not on
-> one-off CLI calls over small directories. See [RELIABILITY.md](RELIABILITY.md) for what is
+> process, which keep the index open). Over a 247k-file tree it answered the benchmark's 20
+> agent regexes at 64 ms p50 against 347 ms for `rg -l`; inside one 3.7k-file repository, 2.3 ms
+> against 9.8 ms. A *new CLI process per query* pays process start and index open each time and
+> is **slower than `rg` on a small repository** (12 ms vs 9.8 ms p50). See
+> [Benchmarks](#benchmarks) for the weak spots and [RELIABILITY.md](RELIABILITY.md) for what is
 > guaranteed and how it is tested.
 
 ## Features
@@ -63,11 +63,11 @@ curl -fsSL https://github.com/corpunum/unumsearch/releases/latest/download/insta
 irm https://github.com/corpunum/unumsearch/releases/latest/download/install.ps1 | iex
 ```
 
-`UNUMSEARCH_VERSION=v0.1.3` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
+`UNUMSEARCH_VERSION=v0.1.4` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
 Every archive and `SHA256SUMS` also carry a GitHub build-provenance attestation:
 
 ```bash
-gh attestation verify unumsearch-v0.1.3-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
+gh attestation verify unumsearch-v0.1.4-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
 ```
 
 Each archive contains the binary, this README, the license, `config.example.toml`, the Agent
@@ -76,7 +76,7 @@ Skill (`skills/`) and the systemd unit (`packaging/`).
 From source (Rust 1.89 or newer):
 
 ```bash
-cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.3
+cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.4
 # or
 git clone https://github.com/corpunum/unumsearch && cd unumsearch
 cargo build --release            # target/release/unumsearch
@@ -199,7 +199,7 @@ Global flags (before the command): `--config`, `--no-default-config`, `--root DI
 
 All output is JSON: `{"ok": true, "result": {...}}` with `backend` (`index`, `scan`, `none`),
 `covered`, `fresh`, `files`, `matches` (`path`, `line`, `text`), `candidates`, `truncated`,
-per-unit `units` status and `elapsed_ms`. Errors: `{"ok": false, "error": "..."}`, exit code 2.
+`complete` (`covered && fresh && !truncated`), per-unit `units` status and `elapsed_ms`. Errors: `{"ok": false, "error": "..."}`, exit code 2.
 
 ## HTTP and JSON-RPC API
 
@@ -216,7 +216,7 @@ one call; the answer adds a per-root `roots` summary). `files`: `root`, `glob`, 
 `lookup` answers "which files contain each of these patterns?" for many patterns in one call:
 `patterns` (JSON array, or newline-separated over `GET`), `root` or `all_roots`, `mode`
 (`literal` default), `ignore_case`, `glob`, `max_files` per pattern (default 100). The result has
-one entry per pattern (`pattern`, `found`, `files`, `covered`, `fresh`, `truncated`). It runs
+one entry per pattern (`pattern`, `found`, `files`, `covered`, `fresh`, `truncated`, `complete`). It runs
 inside the daemon, so it avoids per-request overhead and contention from many parallel calls.
 
 ```bash
@@ -228,8 +228,13 @@ echo '{"jsonrpc":"2.0","id":1,"method":"search","params":{"pattern":"TODO","root
 ```
 
 A client that matches with its own regex dialect can ask for `candidates_only=1` and verify
-the returned files itself; if `fresh` is false, `covered` is false or `truncated` is true, it
-should fall back to its own scan.
+the returned files itself; if `complete` is false (`fresh` false, `covered` false or `truncated`
+true), it should fall back to its own scan.
+
+Memory is bounded per query: besides `max_files` / `max_matches`, the returned paths and lines
+are capped by `max_result_mb` (config, default 48 MiB). A query that reaches a cap stops early
+and its answer is cut in path order (the same cut every time) with `truncated: true`. The daemon
+runs at most `max_concurrent_queries` (default 2) searches at once; further requests wait.
 
 ## MCP server
 
@@ -288,36 +293,63 @@ request surface every front-end uses.
 
 ## Benchmarks
 
-Methodology (reproduce on your own tree with [`bench/bench.py`](bench/bench.py)): 20 real
-queries mined from a week of coding-agent tool calls (identifiers, alternations, short regexes;
-roots from a single sub-directory up to the whole tree), case-insensitive, median of 5 runs
-each, warm page cache. ripgrep runs over the same corpus definition (`unumsearch excludes` as
-`--ignore-file`, `--hidden`, same size cap). p50/p95 are across the 20 per-query medians.
-
-Machine: 16-core/32-thread x86_64, 128 GB RAM, NVMe, Linux. Corpus: 200,508 files, 3.2 GB of
-text after exclusions, in 669 units (about 80 checkouts of one JavaScript monorepo, about 520
+Measured 2026-10-09 on the author's machine (16-core/32-thread Ryzen AI MAX+ 395, 128 GB
+unified memory, NVMe, Linux; a 92 GB local LLM was resident and serving during the runs, so
+absolute numbers carry its noise). Corpus: the author's working tree, 247,535 files and 4.0 GB of
+text after exclusions in 707 units (about 80 checkouts of one JavaScript monorepo, hundreds of
 agent workspaces, a handful of other repositories).
 
-| Engine | Query p50 | Query p95 | Max | Index on disk | Build | Steady RSS | Regex |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| ripgrep 15.1 (no index) | 6.9 ms | 388 ms | 2.9 s | none | none | none | yes |
-| **unumsearch** daemon (HTTP) | **1.0 ms** | **30 ms** | 121 ms | **775 MB** | 63 to 85 s | about 130 MB heap | yes |
-| unumsearch CLI (new process per query) | 21 ms | 40 ms | 61 ms | (same) | | | yes |
-| zoekt (Go, trigram + positions) | 1.4 ms | 434 ms | 787 ms | 8.5 GB | 2 min 49 s | 163 MB | yes |
-| tantivy 0.24, trigram tokenizer, doc-ids only | 2.7 ms | 96 ms | 106 ms | 298 MB | 70 s (500 MB peak) | | literals only |
+Method ([`bench/run_private.sh`](bench/run_private.sh), which drives
+[`race_bench.py`](bench/race_bench.py), [`cold_bench.py`](bench/cold_bench.py) and
+[`summarize.py`](bench/summarize.py)): 20 regexes mined from a week of coding-agent tool calls
+([`bench/queries-agent.json`](bench/queries-agent.json)), case-insensitive, files-only (`-l`).
+ripgrep 15.1 runs over the same corpus definition (`unumsearch excludes` as `--ignore-file`,
+`--hidden`, the same 1 MB size cap). rg, the daemon (HTTP) and the one-shot CLI are interleaved
+query by query with alternating order; each query's median over the runs is taken, p50/p95/worst
+are across the 20 medians, and the whole pass is repeated three times (the median repeat is
+shown). Warm page cache unless stated. The script builds a private index and serves it from a
+private daemon, so it never touches a running one.
 
-- File sets returned by unumsearch were identical to `rg -l` for 20 of 20 queries.
-- Freshness: a file edit was searchable 1 to 21 ms after the write (watcher event, then direct
-  verification of the changed file); the background rebuild of a 40 MB unit takes about 0.5 s.
-- An unindexed `rg -l --hidden -g '!node_modules'` over the two largest roots (which also reads
-  build output and data directories) took 28 to 32 s; the same question answered from the index
-  took 0.25 s (430 matching files verified out of 792 candidates).
-- The next-byte masks cut verification work from 8,783 candidate files to 2,055 for the 20
-  queries (784 actually matching), at the cost of a larger index (442 MB without masks).
-- Binary size: 3.4 MB (x86_64, glibc), 3.6 MB static musl x86_64, 2.9 MB static musl aarch64.
+| Whole tree, 247k files (all roots) | p50 | p95 | worst query |
+| --- | --- | --- | --- |
+| ripgrep 15.1 (no index) | 347 ms | 482 ms | 541 ms |
+| **unumsearch daemon** (HTTP) | **64 ms** | **163 ms** | **381 ms** |
+| unumsearch CLI (new process per query) | 91 ms | 198 ms | 413 ms |
 
-zoekt and tantivy were measured through small purpose-built wrappers over the same file list;
-they are a yardstick, not a tuned comparison.
+| One repository, 3.7k files | p50 | p95 | worst query |
+| --- | --- | --- | --- |
+| ripgrep 15.1 (no index) | 9.8 ms | 12 ms | 13 ms |
+| **unumsearch daemon** (HTTP) | **2.3 ms** | 6.7 ms | 13 ms |
+| unumsearch CLI (new process per query) | 12 ms | 15 ms | 20 ms |
+
+- **Same answers.** Whole tree: identical file sets for 19 of 20 queries; on the 20th
+  (`https?://...`) rg also lists `.env.example` files, which unumsearch never indexes by design
+  (`.env*` is a secret exclude). One repository: 20 of 20.
+- **Cold page cache** (corpus and index evicted with `posix_fadvise` before every call, 5 queries
+  x 3): rg 5.2 s vs CLI 1.4 s median.
+- **Index and build:** 1.02 GB on disk for 4.0 GB of text; a full build takes 61 to 72 s
+  (peak RSS 62 to 72 MB). The index must be built, and the daemon (or an MCP /
+  `rpc` process) kept running, before any of the speed shows up.
+- **Daemon memory:** during the whole-tree race (rg, the daemon and CLI processes all reading
+  the corpus) peak anonymous memory was 80 MB with `MALLOC_ARENA_MAX=2` (as the shipped systemd
+  unit sets) and 211 MB without it; resident file pages of the mmapped index (about 0.6 GB here)
+  are page cache the kernel can reclaim. v0.1.3 reached 568 MB in the same race and was killed by
+  a 512 MB cap; see the [changelog](CHANGELOG.md).
+- **Weak spots.** The one-shot CLI is slower than rg on a small repository (12 vs 9.8 ms). The
+  worst query, `(get|set)[A-Z]\w+\(` (80k matching files, about a third of the corpus), is where
+  the index helps least: the trigram filter keeps most of the corpus and every candidate is read;
+  v0.1.4 brought it from 790-1,240 ms to 380-530 ms (rg: 470-540 ms). No multiline (`-U`)
+  patterns.
+- The one-repository row is from the v0.1.3 run of the same morning (the v0.1.4 run, taken while
+  the machine was busier, measured every engine about 1.7x slower). In interleaved A/B runs on the
+  same index, v0.1.4 was faster than v0.1.3 on every one of the 20 queries in that repository
+  (p50 2.0 to 1.6 ms, p95 7.6 to 3.4 ms) and over the whole tree (p50 126 to 83 ms, p95 1,258 to
+  210 ms, worst 1,341 to 775 ms in a run with the machine heavily loaded).
+- Binary size: about 3.5 MB (x86_64, glibc), 3.6 MB static musl x86_64, 2.9 MB static musl
+  aarch64.
+
+[`bench/bench.py`](bench/bench.py) is a simpler single-pass version for a quick check on your own
+tree.
 
 ## Platform status
 

@@ -23,6 +23,11 @@ What unumsearch promises, how that is tested, and how its speed is measured.
    off loopback.
 7. **Corruption is survivable.** A truncated, scrambled or missing shard or manifest never
    panics a reader; the unit reports not-ready and the writer rebuilds it.
+8. **Bounded memory, honest truncation.** A query's returned paths and lines are capped by
+   `max_files`, `max_matches` and `max_result_mb`; past a cap the answer is cut in path order
+   (deterministically) and says `truncated: true`, `complete: false`. The daemon runs at most
+   `max_concurrent_queries` searches at once. The watcher never queues read-only events and its
+   queue is bounded; an overflow marks every unit dirty instead of growing memory.
 
 ## Tests
 
@@ -32,6 +37,7 @@ What unumsearch promises, how that is tested, and how its speed is measured.
 | Randomised differential test against `rg` (static corpora; Unicode and Greek, ignore files, hidden, binary, oversize, secrets), and a watcher phase with creates, edits, deletes, file and directory renames, ignore-file edits, ignored-file churn, symlinks and size-cap crossings: every `fresh` answer must equal `rg`, and the index must always converge | `tests/differential.rs` |
 | Roots, secrets, HTTP hardening, shard generations, `files()` limits, overlapping roots, cross-process freshness | `tests/trust.rs` |
 | Simulated disk failure during a rebuild | `tests/trust_failpoint.rs` |
+| Result budget and deterministic truncation, a busy watcher flooded with reads and writes (counting allocator) | `tests/bounded.rs` |
 | CLI, stdio JSON-RPC, MCP | `tests/cli.rs` |
 
 CI runs all of it on Linux x86_64 and arm64, macOS and Windows. Reproduce or deepen the
@@ -44,12 +50,16 @@ UNUMSEARCH_DIFF_SEED=12345 cargo test --test differential static_corpora   # rep
 
 ## Benchmark method
 
-[`bench/bench.py`](bench/bench.py) runs a list of real queries (`[root, pattern, glob]`) against
-ripgrep over the same corpus definition, the daemon's HTTP API and the CLI, median of N runs each
-with a warm page cache, and checks that the file sets are identical. Report the daemon p50/p95 and
-the CLI p50/p95. Changes that touch the query path are compared before/after on the same machine
-and index with `--skip-rg` (timing only), and are not merged if they slow the daemon or CLI.
+[`bench/run_private.sh`](bench/run_private.sh) reproduces the README numbers without touching a
+running daemon: it builds a private index of your config (twice, for build time and size),
+serves it from a private daemon, races `rg -l` / the daemon / the CLI over one repository and
+over every root with interleaved order (recording the daemon's peak memory), measures a cold
+page cache, and writes `summary.json`. [`bench/bench.py`](bench/bench.py) is a quicker
+single-pass check. Report p50/p95/worst over the per-query medians and the file-set parity.
+Changes that touch the query path are compared before/after on the same machine and index,
+interleaved, and are not merged if they slow the daemon or CLI.
 
 The daemon is the fast path. A CLI call that starts a new process per query pays process start
-and index open and is slower than `rg` at the median on small trees; the index's advantage is the
-tail and large trees.
+and index open and is slower than `rg` at the median on a small repository; the index's
+advantage is repeated queries over large trees. Its weakest case is a pattern whose candidates
+are a large share of the corpus (every candidate must still be read).

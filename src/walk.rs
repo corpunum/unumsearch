@@ -60,8 +60,15 @@ pub fn mtime_ns(md: &std::fs::Metadata) -> i64 {
 
 /// List the corpus under `root`, sorted by relative path.
 pub fn list(cfg: &Config, root: &Path) -> Vec<FileEntry> {
+    list_depth(cfg, root, None)
+}
+
+/// [`list`], descending at most `max_depth` levels (`Some(1)`: only the
+/// files directly inside `root`).
+pub fn list_depth(cfg: &Config, root: &Path, max_depth: Option<usize>) -> Vec<FileEntry> {
     let excl = exclude_matcher(cfg, root);
     let mut wb = WalkBuilder::new(root);
+    wb.max_depth(max_depth);
     wb.hidden(!cfg.hidden)
         .git_ignore(cfg.gitignore)
         .git_global(cfg.gitignore)
