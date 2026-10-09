@@ -1126,7 +1126,15 @@ impl Engine {
         }
         let fp = walk::fingerprint(&files);
         let shards_ok = prev_shards.iter().all(|s| self.dir.join(s).exists());
-        if !force && fp == prev_fp && shards_ok && (!prev_shards.is_empty() || files.is_empty()) {
+        // An unchanged listing means nothing to do, unless an event reported
+        // a file as changed: a rewrite can keep the size and the mtime (a
+        // coarse clock, a restored mtime; Windows has no ctime to tell).
+        if !force
+            && fp == prev_fp
+            && pending_at_start.is_empty()
+            && shards_ok
+            && (!prev_shards.is_empty() || files.is_empty())
+        {
             let mut g = self.inner.write().unwrap();
             if let Some(u) = g.m.units.get_mut(unit) {
                 finish_build(u);
