@@ -9,7 +9,13 @@ What unumsearch promises, how that is tested, and how its speed is measured.
 2. **Honest freshness.** An answer says `fresh: true` only when the index plus the direct
    verification of known-changed files is exact. Changes the overlay cannot represent
    (directory moves, ignore-file edits, lost events) and failed rebuilds make it `fresh: false`;
-   clients should then fall back to their own scan.
+   clients should then fall back to their own scan. This holds while a rebuild runs, too: the
+   pending changes stay in force until the new shards are live, in the same step. Freshness
+   covers every change whose notification has reached the daemon; a query cannot know about a
+   change whose notification is still in the kernel. On macOS each root is watched once at
+   start, because every watch change restarts the FSEvents stream and drops events for all
+   paths; a later watch change marks every unit for re-listing. Known gap on Windows:
+   [#7](https://github.com/corpunum/unumsearch/issues/7).
 3. **Failed rebuilds are transactional.** If writing the new shards fails (disk full, I/O error)
    the old index is kept, every change that was pending is kept, the unit is marked not fresh and
    the rebuild is retried with back-off. Shard files get unique, strictly increasing generation
@@ -45,6 +51,7 @@ What unumsearch promises, how that is tested, and how its speed is measured.
 | Randomised differential test against `rg` (static corpora; Unicode and Greek, ignore files, hidden, binary, oversize, secrets), and a watcher phase with creates, edits, deletes, file and directory renames, ignore-file edits, ignored-file churn, symlinks and size-cap crossings: every `fresh` answer must equal `rg`, and the index must always converge | `tests/differential.rs` |
 | Roots, secrets, HTTP hardening, shard generations, `files()` limits, overlapping roots, cross-process freshness | `tests/trust.rs` |
 | Simulated disk failure during a rebuild | `tests/trust_failpoint.rs` |
+| Queries during a (deliberately slowed) rebuild keep pending changes exact; changes during a rebuild survive it; the macOS CI failure of issue #6 (seed 1024301) replayed with slow rebuilds | `tests/build_window.rs`, `tests/differential.rs` |
 | Result budget and deterministic truncation, a busy watcher flooded with reads and writes (counting allocator) | `tests/bounded.rs` |
 | CLI, stdio JSON-RPC, MCP | `tests/cli.rs` |
 | Coverage of roots under each exclusion kind (ignore files, excludes, secrets, hidden, size, symlinks, split-root non-unit children) across the engine, API and CLI | `tests/coverage.rs` |

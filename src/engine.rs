@@ -18,7 +18,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -52,6 +52,21 @@ pub struct UnitState {
     /// edits, lost events): the unit is not fresh until rebuilt.
     #[serde(default)]
     pub pending_unknown: bool,
+    /// A rebuild of this unit is running. Its listing may predate changes
+    /// that arrive meanwhile, so those are also recorded below; the state
+    /// above stays exactly as it was (and visible to queries) until the
+    /// rebuild publishes its shards (issue #6).
+    #[serde(skip)]
+    pub building: bool,
+    /// Files changed since the running rebuild began.
+    #[serde(skip)]
+    pub build_pending: std::collections::BTreeSet<String>,
+    /// An unrepresentable change arrived since the running rebuild began.
+    #[serde(skip)]
+    pub build_unknown: bool,
+    /// When the first change since the running rebuild began arrived.
+    #[serde(skip)]
+    pub build_dirty_since_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// For a split root's own unit: directories directly inside it that its
@@ -133,6 +148,10 @@ pub struct Engine {
     /// Whether the corpus walk of a unit reaches a sub-directory, keyed by
     /// (unit, sub) and valid for the unit fingerprint it was computed at.
     reach_cache: Mutex<HashMap<(String, String), (u64, bool)>>,
+    /// Test hook: sleep this long inside every rebuild, after the listing
+    /// and before the new shards are published (emulates a slow disk, e.g.
+    /// `F_FULLFSYNC` on macOS, which makes the rebuild window long).
+    build_stall_ms: AtomicU64,
 }
 
 /// A held query slot; dropping it lets a waiting query run.
@@ -334,6 +353,20 @@ struct Cand<'a> {
     rel: std::borrow::Cow<'a, str>,
 }
 
+/// A rebuild succeeded (its shards are live, or its listing matched the
+/// index): what was pending when it began is resolved; only changes that
+/// arrived while it ran remain pending.
+fn finish_build(u: &mut UnitState) {
+    u.building = false;
+    u.pending = std::mem::take(&mut u.build_pending);
+    u.pending_unknown = std::mem::take(&mut u.build_unknown);
+    u.dirty = !u.pending.is_empty() || u.pending_unknown;
+    if u.dirty {
+        u.dirty_since_ms = u.build_dirty_since_ms;
+    }
+    u.build_dirty_since_ms = 0;
+}
+
 /// A source of candidates: a unit's path, its shards and its pending
 /// (changed since build) files, snapshotted under the lock.
 struct Src {
@@ -474,6 +507,7 @@ impl Engine {
             need_unit_scan: AtomicBool::new(false),
             doc_sets: Mutex::new(HashMap::new()),
             last_gen: AtomicU64::new(now_ms()),
+            build_stall_ms: AtomicU64::new(0),
             anchors: OnceLock::new(),
             running: (Mutex::new(0), std::sync::Condvar::new()),
             splits: OnceLock::new(),
@@ -848,6 +882,17 @@ impl Engine {
                 u.dirty_since_ms = t;
             }
             u.last_event_ms = t;
+            if u.building {
+                if u.build_dirty_since_ms == 0 {
+                    u.build_dirty_since_ms = t;
+                }
+                match &change {
+                    Change::File(rel) if u.build_pending.len() < MAX_PENDING => {
+                        u.build_pending.insert(rel.clone());
+                    }
+                    _ => u.build_unknown = true,
+                }
+            }
             match change {
                 Change::File(rel) if u.pending.len() < MAX_PENDING => {
                     u.pending.insert(rel);
@@ -872,6 +917,12 @@ impl Engine {
             }
             u.last_event_ms = t;
             u.pending_unknown = true;
+            if u.building {
+                if u.build_dirty_since_ms == 0 {
+                    u.build_dirty_since_ms = t;
+                }
+                u.build_unknown = true;
+            }
         }
     }
 
@@ -906,15 +957,18 @@ impl Engine {
         let _guard = self.build_lock.lock().unwrap();
         let prev_fp;
         let prev_shards;
-        // What was pending when this build began: restored if it fails.
-        let taken_pending;
         {
             let mut g = self.inner.write().unwrap();
             let u = g.m.units.get_mut(unit)?;
-            // Cleared before listing: events during the build re-mark it.
-            u.dirty = false;
-            taken_pending = std::mem::take(&mut u.pending);
-            u.pending_unknown = false;
+            // The dirty flag and pending overlay stay as they are until the
+            // new shards are published: until then queries are served from
+            // the old index, which only the overlay makes exact (issue #6).
+            // Changes arriving meanwhile are also tracked separately, as the
+            // listing below may predate them.
+            u.building = true;
+            u.build_pending.clear();
+            u.build_unknown = false;
+            u.build_dirty_since_ms = 0;
             prev_fp = u.fingerprint;
             prev_shards = u.shards.clone();
         }
@@ -929,12 +983,16 @@ impl Engine {
                 let mut g = self.inner.write().unwrap();
                 if let Some(u) = g.m.units.get_mut(unit) {
                     u.error = Some(why);
+                    // Everything pending before and during the build still is.
+                    u.building = false;
+                    u.build_pending.clear();
+                    u.build_unknown = false;
+                    u.build_dirty_since_ms = 0;
                     u.dirty = true;
                     if u.dirty_since_ms == 0 {
                         u.dirty_since_ms = t;
                     }
                     u.last_event_ms = t;
-                    u.pending.extend(taken_pending.iter().cloned());
                     // The new listing was never indexed: unknown changes.
                     u.pending_unknown = true;
                     u.failures = u.failures.saturating_add(1);
@@ -958,11 +1016,16 @@ impl Engine {
         } else {
             walk::list(&self.cfg, &root)
         };
+        let stall = self.build_stall_ms.load(Ordering::Relaxed);
+        if stall > 0 {
+            std::thread::sleep(Duration::from_millis(stall));
+        }
         let fp = walk::fingerprint(&files);
         let shards_ok = prev_shards.iter().all(|s| self.dir.join(s).exists());
         if !force && fp == prev_fp && shards_ok && (!prev_shards.is_empty() || files.is_empty()) {
             let mut g = self.inner.write().unwrap();
             if let Some(u) = g.m.units.get_mut(unit) {
+                finish_build(u);
                 u.ready = true;
                 u.indexed_at_ms = now_ms();
                 u.error = None;
@@ -1033,6 +1096,9 @@ impl Engine {
             let mut g = self.inner.write().unwrap();
             g.shards.insert(unit.to_string(), Arc::new(opened));
             if let Some(u) = g.m.units.get_mut(unit) {
+                // Same lock as the shard swap: no query sees the new index
+                // with the old overlay cleared, or the old index without it.
+                finish_build(u);
                 u.shards = names.clone();
                 u.fingerprint = fp;
                 u.files = docs;
@@ -1061,6 +1127,13 @@ impl Engine {
             let _ = std::fs::remove_file(self.dir.join(s));
         }
         Some(files)
+    }
+
+    /// Test hook: make every rebuild of this engine take at least `ms`
+    /// longer, between its listing and the publish of its new shards.
+    #[doc(hidden)]
+    pub fn set_build_stall_ms(&self, ms: u64) {
+        self.build_stall_ms.store(ms, Ordering::Relaxed);
     }
 
     /// A shard generation number: strictly increasing within this process
