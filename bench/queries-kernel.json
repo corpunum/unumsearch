@@ -1,0 +1,14 @@
+[
+  ["kernel", "EXPORT_SYMBOL_GPL\\(\\w+\\)", "*.c"],
+  ["kernel", "static int \\w+_probe\\(struct platform_device", "*.c"],
+  ["kernel", "TODO|FIXME", null],
+  ["kernel", "spin_lock_irqsave\\(", null],
+  ["kernel", "devm_kzalloc\\(", "*.c"],
+  ["kernel", "MODULE_DEVICE_TABLE\\(of,", null],
+  ["kernel", "compatible = \"[a-z0-9-]+,[a-z0-9-]+\"", "*.dts*"],
+  ["kernel", "^config [A-Z0-9_]+$", "Kconfig*"],
+  ["kernel", "rcu_read_lock\\(\\)", null],
+  ["kernel", "#include <linux/(slab|mm)\\.h>", "*.[ch]"],
+  ["kernel", "SPDX-License-Identifier: GPL-2\\.0-only", null],
+  ["kernel", "kmalloc_array\\(", null]
+]
