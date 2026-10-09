@@ -18,7 +18,7 @@ What is timed, per query and engine:
     python3 bench/race.py --root .                       # this repository, built-in queries
     python3 bench/race.py --root ~/src --queries q.txt   # one regex per line
 """
-import argparse, json, os, shutil, subprocess, sys, tempfile, threading, time, urllib.parse, urllib.request
+import argparse, json, os, shutil, subprocess, sys, tempfile, textwrap, threading, time, urllib.parse, urllib.request
 
 DEFAULT_QUERIES = [
     r"TODO|FIXME", r"fn\s+main\s*\(", r"async function \w+", r"process\.env\.[A-Z_]+",
@@ -116,7 +116,8 @@ for e in ENGINES:
 # ---------------------------------------------------------------- drawing
 B, DIM, RST, YEL = "\x1b[1m", "\x1b[38;5;245m", "\x1b[0m", "\x1b[38;5;221m"
 COLS = min(shutil.get_terminal_size((100, 30)).columns, 140)
-BARW = max(20, COLS - 46)
+NARROW = COLS < 80  # e.g. a phone-shaped terminal: stacked rows, short labels
+BARW = max(10, COLS - 14) if NARROW else max(20, COLS - 46)
 qi_now, q_now = 0, ""
 
 def fmt(ms):
@@ -128,7 +129,7 @@ def bar(frac, width):
     full = int(n)
     return "█" * full + (eighths[int((n - full) * 8)] if full < width else "") + " " * (width - full - 1 if full < width else 0)
 
-def draw(final=False):
+def draw_wide(final=False):
     scale = max([e["total"] + (e["cur"] if e["running"] else 0) for e in ENGINES] + [1e-9])
     out = ["\x1b[H"]
     out.append(f"{B}unumsearch race{RST}  {DIM}{a.label}{RST}\x1b[K")
@@ -161,6 +162,50 @@ def draw(final=False):
         out.append("\x1b[K")
     out.append(f"{DIM}live run, real timings · python3 bench/race.py · github.com/corpunum/unumsearch{RST}\x1b[K\x1b[J")
     sys.stdout.write("\n".join(out)); sys.stdout.flush()
+
+def wrap(text, indent=""):
+    return [indent + l for l in textwrap.wrap(text, COLS - len(indent) - 1)] or [indent]
+
+def draw_narrow(final=False):
+    scale = max([e["total"] + (e["cur"] if e["running"] else 0) for e in ENGINES] + [1e-9])
+    home = os.path.expanduser("~")
+    root = ROOT.replace(home, "~", 1) if ROOT.startswith(home) else ROOT
+    lines = [f"{B}unumsearch race{RST}"]
+    lines += [f"{DIM}{l}{RST}" for l in wrap(a.label)] if a.label else []
+    lines += [f"{DIM}{l}{RST}" for l in wrap(f"root {root}")]
+    lines += [f"{DIM}{l}{RST}" for l in wrap((f"{INDEX_FILES:,} files indexed · " if INDEX_FILES else "") + f"{len(QUERIES)} queries · -l{' -i' if CI else ''}")]
+    lines += [f"{DIM}{l}{RST}" for l in wrap("timed: wall time per query, one engine at a time, warm cache, index already built")]
+    lines.append("")
+    if final:
+        lines.append(f"{YEL}all queries done{RST}")
+    else:
+        lines.append(f"{YEL}query {qi_now}/{len(QUERIES)}{RST}")
+        lines.append(f"{YEL}{q_now[:COLS - 1]}{RST}")
+    lines.append("")
+    for e in ENGINES:
+        tot = e["total"] + (e["cur"] if e["running"] else 0)
+        lines.append(f"{e['col']}{B}{e['name']}{RST} {DIM}{e['ver'].split()[-1]}{RST}")
+        lines += [f"{DIM}{l}{RST}" for l in wrap(e["how"], "  ")]
+        lines.append(f"  {e['col']}{bar(tot / scale, BARW)}{RST} {B}{fmt(tot).strip():>9}{RST}")
+        run = " ◀" if e["running"] else ""
+        lines.append(f"  {DIM}q {e['done']}/{len(QUERIES)} · this query {fmt(e['cur']).strip()}{run}{RST}")
+        same = f" · same as rg {e['match']}/{e['done']}" if e["name"] != "rg" else ""
+        lines.append(f"  {DIM}files {e['files']:,}{same}{' · errors ' + str(e['err']) if e['err'] else ''}{RST}")
+        lines.append("")
+    if final:
+        rg_t = ENGINES[0]["total"]
+        lines.append(f"{B}result{RST}")
+        for e in ENGINES:
+            mult = "" if e["name"] == "rg" or e["total"] <= 0 else f"  {rg_t / e['total']:.1f}x vs rg"
+            lines.append(f"  {e['col']}{B}{e['name']:<11}{RST}{B}{fmt(e['total']).strip():>9}{RST}{mult}")
+            if e["name"] != "rg":
+                lines.append(f"  {DIM}same files as rg: {e['match']}/{len(QUERIES)}{' · errors ' + str(e['err']) if e['err'] else ''}{RST}")
+        lines.append("")
+    lines += [f"{DIM}live run, real timings{RST}", f"{DIM}python3 bench/race.py{RST}", f"{DIM}github.com/corpunum/unumsearch{RST}"]
+    sys.stdout.write("\x1b[H" + "\n".join(l + "\x1b[K" for l in lines) + "\x1b[J"); sys.stdout.flush()
+
+def draw(final=False):
+    (draw_narrow if NARROW else draw_wide)(final)
 
 # ---------------------------------------------------------------- race
 sys.stdout.write("\x1b[?25l\x1b[2J"); sys.stdout.flush()
