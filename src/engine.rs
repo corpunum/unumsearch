@@ -985,15 +985,18 @@ impl Engine {
         }
     }
 
-    /// Is every change to `unit` already "unknown" (it will be re-listed
-    /// whole, and a running rebuild will be followed by another)? Then a
-    /// further event can only move its quiet period, and the watcher need not
-    /// work out what the event changed.
-    pub fn unknown_dirty(&self, unit: &str) -> bool {
+    /// Can no further event change what is known about `unit`? True once it
+    /// awaits a full re-listing and its pending set is full (a large change
+    /// such as a branch switch): another event could only move its quiet
+    /// period, so the watcher need not work out what the event changed.
+    pub fn saturated(&self, unit: &str) -> bool {
         let g = self.inner.read().unwrap();
-        g.m.units
-            .get(unit)
-            .is_some_and(|u| u.dirty && u.pending_unknown && (!u.building || u.build_unknown))
+        g.m.units.get(unit).is_some_and(|u| {
+            u.dirty
+                && u.pending_unknown
+                && u.pending.len() >= MAX_PENDING
+                && (!u.building || (u.build_unknown && u.build_pending.len() >= MAX_PENDING))
+        })
     }
 
     /// Persist dirty/pending state for reader processes.

@@ -360,12 +360,13 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                         let Some(unit) = engine.unit_of_path(p) else {
                             continue;
                         };
-                        // A unit that will be re-listed whole anyway (a large
-                        // change such as a branch switch): only its quiet
-                        // period moves. Working out each of tens of thousands
-                        // of events (directory listings for new files) used
-                        // to delay the rebuild by seconds.
-                        if engine.unknown_dirty(&unit) {
+                        // A unit with as many pending files as it can hold
+                        // that will be re-listed whole anyway (a large change
+                        // such as a branch switch): only its quiet period
+                        // moves. Working out each of tens of thousands of
+                        // events (directory listings for new files) delayed
+                        // the rebuild by seconds.
+                        if engine.saturated(&unit) {
                             engine.mark_dirty(&unit, Change::Unknown);
                             continue;
                         }
