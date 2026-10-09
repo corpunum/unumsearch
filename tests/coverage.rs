@@ -77,7 +77,10 @@ fn search(e: &Engine, root: &Path, scan: bool) -> SearchResult {
 fn assert_uncovered(r: &SearchResult, root: &Path, reason: &str) {
     assert!(!r.covered && !r.complete, "{r:?}");
     assert_eq!(r.uncovered.len(), 1, "{r:?}");
-    assert_eq!(r.uncovered[0].path, root.to_string_lossy(), "{r:?}");
+    // The answer names the root as the engine normalised it ('/' becomes
+    // '\\' on Windows).
+    let want = unumsearch::config::normalize(root);
+    assert_eq!(r.uncovered[0].path, want.to_string_lossy(), "{r:?}");
     assert_eq!(r.uncovered[0].reason, reason, "{r:?}");
 }
 
