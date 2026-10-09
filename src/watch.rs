@@ -27,8 +27,7 @@ const RECURSIVE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 /// notify's FSEvents backend runs one stream for all watched paths and
 /// restarts it on every `watch`/`unwatch`, from "now": events that happen
 /// while it restarts are lost for every path, not just the new one. So on
-/// macOS each configured (and split) root is watched once, up front, and
-/// any later watch change marks every unit as needing a re-listing.
+/// macOS a watch change marks every unit as needing a re-listing.
 const STREAM_RESTARTS: bool = cfg!(target_os = "macos");
 
 fn dirs_for(unit: &Path, files: &[FileEntry]) -> HashSet<PathBuf> {
@@ -48,9 +47,6 @@ fn dirs_for(unit: &Path, files: &[FileEntry]) -> HashSet<PathBuf> {
 struct Ctx<W: Watcher> {
     engine: Arc<Engine>,
     watcher: Option<W>,
-    /// Roots watched recursively once at start ([`STREAM_RESTARTS`]): units
-    /// below them need no watch of their own.
-    stable: Vec<PathBuf>,
 }
 
 impl<W: Watcher> Ctx<W> {
@@ -60,10 +56,6 @@ impl<W: Watcher> Ctx<W> {
             return 0;
         };
         let unit_p = PathBuf::from(unit);
-        if self.stable.iter().any(|r| unit_p.starts_with(r)) {
-            self.engine.set_watched(unit, true);
-            return 0;
-        }
         let mut ok = true;
         let mut added = 0;
         let mut watched = self.engine.watched_dirs.lock().unwrap();
@@ -301,31 +293,11 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
     let mut ctx = Ctx {
         engine: engine.clone(),
         watcher,
-        stable: Vec::new(),
     };
+    // Split roots are watched themselves so new units appear promptly.
     if let Some(w) = ctx.watcher.as_mut() {
-        if STREAM_RESTARTS {
-            // Every root, split or not, recursively, before anything is
-            // listed: no stream restart is needed afterwards.
-            let mut tops = engine.cfg.root_paths();
-            tops.extend(engine.cfg.split_paths());
-            tops.sort();
-            tops.dedup();
-            let outer: Vec<PathBuf> = tops
-                .iter()
-                .filter(|p| !tops.iter().any(|q| q != *p && p.starts_with(q)))
-                .cloned()
-                .collect();
-            for t in outer {
-                if w.watch(&t, RecursiveMode::Recursive).is_ok() {
-                    ctx.stable.push(t);
-                }
-            }
-        } else {
-            // Split roots are watched themselves so new units appear promptly.
-            for s in engine.cfg.split_paths() {
-                let _ = w.watch(&s, RecursiveMode::NonRecursive);
-            }
+        for s in engine.cfg.split_paths() {
+            let _ = w.watch(&s, RecursiveMode::NonRecursive);
         }
     }
     let splits: Vec<PathBuf> = engine.cfg.split_paths();

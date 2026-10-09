@@ -12,9 +12,9 @@ What unumsearch promises, how that is tested, and how its speed is measured.
    clients should then fall back to their own scan. This holds while a rebuild runs, too: the
    pending changes stay in force until the new shards are live, in the same step. Freshness
    covers every change whose notification has reached the daemon; a query cannot know about a
-   change whose notification is still in the kernel. On macOS each root is watched once at
-   start, because every watch change restarts the FSEvents stream and drops events for all
-   paths; a later watch change marks every unit for re-listing. Known gap on Windows:
+   change whose notification is still in the kernel. On macOS every watch change restarts the
+   FSEvents stream and drops events for all paths, so it marks every unit for re-listing. Known
+   gap on Windows:
    [#7](https://github.com/corpunum/unumsearch/issues/7).
 3. **Failed rebuilds are transactional.** If writing the new shards fails (disk full, I/O error)
    the old index is kept, every change that was pending is kept, the unit is marked not fresh and

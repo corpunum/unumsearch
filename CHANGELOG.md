@@ -18,8 +18,8 @@ No API change; query latency unchanged.
 - **Fix (macOS): adding or removing a watch could drop other units' events.** notify's FSEvents
   backend restarts its single stream on every watch change, from "now", so events for every path
   were lost while it restarted (for example when a new checkout appeared under a split root).
-  Each configured and split root is now watched once at start, so units need no watch of their
-  own; if a watch change is still needed, every unit is marked for re-listing.
+  A watch change on macOS now marks every unit for re-listing (writer-side work only; a listing
+  whose fingerprint is unchanged rebuilds nothing).
 - Tests: `tests/build_window.rs` slows rebuilds down on purpose (a test hook) and fails without
   the fix on any platform; `seed_1024301_with_slow_rebuilds_stays_exact` replays the macOS CI
   failure on any platform, deterministically.
