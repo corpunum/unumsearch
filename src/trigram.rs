@@ -28,6 +28,107 @@ pub fn next_bit(b: u8) -> u8 {
     1 << ((b ^ (b >> 3)) & 7)
 }
 
+/// [`extract`] without the sort: the same distinct (trigram, next-byte
+/// mask) pairs, in no particular order, deduplicated through a reusable
+/// open-addressing table instead of sorting every position. Index building
+/// spends most of its time here; a shard builder does not need the order.
+#[derive(Default)]
+pub struct Extractor {
+    keys: Vec<u32>,
+    masks: Vec<u8>,
+    /// Slots filled by the current document, in insertion order.
+    used: Vec<u32>,
+    bits: u32,
+}
+
+const EMPTY: u32 = u32::MAX;
+/// Table size kept between documents (2^bits slots, 5 bytes each).
+const BASE_BITS: u32 = 14;
+const KEEP_BITS: u32 = 17;
+
+impl Extractor {
+    fn reset(&mut self, bits: u32) {
+        self.bits = bits;
+        self.keys = vec![EMPTY; 1 << bits];
+        self.masks = vec![0; 1 << bits];
+    }
+
+    #[inline]
+    fn insert(&mut self, t: Tri, m: u8) {
+        let mask = (1usize << self.bits) - 1;
+        let mut i = (t.wrapping_mul(0x9E37_79B1) >> (32 - self.bits)) as usize;
+        loop {
+            let k = self.keys[i];
+            if k == t {
+                self.masks[i] |= m;
+                return;
+            }
+            if k == EMPTY {
+                self.keys[i] = t;
+                self.masks[i] = m;
+                self.used.push(i as u32);
+                return;
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    fn grow(&mut self) {
+        let entries: Vec<(u32, u8)> = self
+            .used
+            .iter()
+            .map(|&i| (self.keys[i as usize], self.masks[i as usize]))
+            .collect();
+        self.used.clear();
+        self.reset(self.bits + 1);
+        for (k, m) in entries {
+            self.insert(k, m);
+        }
+    }
+
+    pub fn extract(&mut self, content: &[u8], out: &mut Vec<(Tri, u8)>) {
+        out.clear();
+        if content.len() < 3 {
+            return;
+        }
+        if self.bits == 0 {
+            self.reset(BASE_BITS);
+        }
+        let (mut a, mut b) = (fold(content[0]), fold(content[1]));
+        for i in 2..content.len() {
+            let c = fold(content[i]);
+            let m = match content.get(i + 1) {
+                Some(&d) => next_bit(fold(d)),
+                None => 0,
+            };
+            self.insert(pack(a, b, c), m);
+            if self.used.len() * 2 > self.keys.len() {
+                self.grow();
+            }
+            a = b;
+            b = c;
+        }
+        out.reserve(self.used.len());
+        for &i in &self.used {
+            let i = i as usize;
+            out.push((self.keys[i], self.masks[i]));
+            self.keys[i] = EMPTY;
+            self.masks[i] = 0;
+        }
+        self.used.clear();
+        // A table grown for one large file is not kept for the next.
+        if self.bits > KEEP_BITS {
+            self.reset(BASE_BITS);
+            self.used = Vec::new();
+        }
+    }
+
+    /// Bytes held between documents.
+    pub fn memory(&self) -> usize {
+        self.keys.capacity() * 5 + self.used.capacity() * 4
+    }
+}
+
 /// Distinct folded trigrams of `content` with, for each, a mask of the
 /// (folded) bytes that follow it anywhere in the document. The mask lets a
 /// query require "abc followed by d" -- adjacency the bare trigram set loses --
@@ -306,6 +407,39 @@ pub fn plan(pattern: &str, case_insensitive: bool) -> Result<Plan, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extractor_matches_sorted_extract() {
+        let mut x = Extractor::default();
+        let mut seed = 0x1234_5678_u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut docs: Vec<Vec<u8>> = vec![
+            b"".to_vec(),
+            b"ab".to_vec(),
+            b"abc".to_vec(),
+            b"Hello hello HELLO".to_vec(),
+            "καλημέρα ΚΑΛΗΜΕΡΑ".as_bytes().to_vec(),
+        ];
+        for len in [10usize, 300, 5000, 70_000, 300_000] {
+            let alphabet = if len > 10_000 { 256 } else { 7 };
+            docs.push((0..len).map(|_| (rnd() % alphabet) as u8).collect());
+        }
+        // Grow and shrink back between documents.
+        docs.push(b"short again".to_vec());
+        for d in &docs {
+            let mut want = Vec::new();
+            extract(d, &mut want);
+            let mut got = Vec::new();
+            x.extract(d, &mut got);
+            got.sort_unstable();
+            assert_eq!(got, want, "doc of {} bytes", d.len());
+        }
+    }
 
     fn t(s: &str) -> Plan {
         let b = s.as_bytes();

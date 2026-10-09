@@ -42,13 +42,39 @@ fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     out.push(v as u8);
 }
 
+/// Hasher for trigram keys: one multiply (Fibonacci hashing). The default
+/// SipHash is built to resist adversarial keys, which costs most of the
+/// time of adding a document; a trigram is three bytes of content, and a
+/// file crafted to collide only slows its own indexing.
+#[derive(Default, Clone, Copy)]
+pub struct TriHasher(u64);
+
+impl std::hash::Hasher for TriHasher {
+    fn finish(&self) -> u64 {
+        // The high half of the product mixes every key bit; hash tables
+        // index by the low bits.
+        self.0.rotate_left(32)
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.0 = (self.0.rotate_left(5) ^ *b as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        }
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.0 = (v as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+type TriMap<V> = HashMap<Tri, V, std::hash::BuildHasherDefault<TriHasher>>;
+
 /// Accumulates documents in memory until `budget` bytes of postings, then the
 /// caller flushes it to a shard file.
 pub struct ShardBuilder {
     docs: Vec<DocMeta>,
-    post: HashMap<Tri, Posting>,
+    post: TriMap<Posting>,
     bytes: usize,
     scratch: Vec<(Tri, u8)>,
+    ex: trigram::Extractor,
 }
 
 impl Default for ShardBuilder {
@@ -61,9 +87,10 @@ impl ShardBuilder {
     pub fn new() -> Self {
         ShardBuilder {
             docs: Vec::new(),
-            post: HashMap::new(),
+            post: TriMap::default(),
             bytes: 0,
             scratch: Vec::new(),
+            ex: trigram::Extractor::default(),
         }
     }
 
@@ -78,13 +105,17 @@ impl ShardBuilder {
     /// Approximate heap held by the builder.
     pub fn memory(&self) -> usize {
         // Hash-map entry + small-vector header + allocator overhead per trigram.
-        self.bytes + self.post.len() * 80 + self.docs.len() * 96 + self.scratch.capacity() * 8
+        self.bytes
+            + self.post.len() * 80
+            + self.docs.len() * 96
+            + self.scratch.capacity() * 8
+            + self.ex.memory()
     }
 
     pub fn add(&mut self, meta: DocMeta, content: &[u8]) {
         let id = self.docs.len() as i64;
         self.docs.push(meta);
-        trigram::extract(content, &mut self.scratch);
+        self.ex.extract(content, &mut self.scratch);
         for &(t, mask) in &self.scratch {
             let p = self.post.entry(t).or_insert(Posting {
                 last: -1,
@@ -153,6 +184,7 @@ pub struct DocRef<'a> {
 }
 
 pub struct Shard {
+    path: std::path::PathBuf,
     map: Mmap,
     /// Byte offset of each document record inside the map.
     doc_offs: Vec<u32>,
@@ -218,6 +250,7 @@ impl Shard {
             let _ = unsafe { map.unchecked_advise(memmap2::UncheckedAdvice::DontNeed) };
         }
         Ok(Shard {
+            path: path.to_path_buf(),
             map,
             doc_offs,
             ntri,
@@ -250,6 +283,11 @@ impl Shard {
 
     pub fn disk_bytes(&self) -> usize {
         self.map.len()
+    }
+
+    /// Where the shard file is.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     fn postings(&self, t: Tri) -> Option<&[u8]> {
@@ -346,6 +384,268 @@ impl Shard {
     }
 }
 
+/// One input of [`merge`]: a shard and which of its documents to keep
+/// (`None` = all of them).
+pub struct MergeInput<'a> {
+    pub shard: &'a Shard,
+    pub alive: Option<&'a [bool]>,
+}
+
+/// Sequential reader of one input's trigram table and postings, through
+/// buffered `read`s rather than the mapping: a merge streams every posting
+/// list once, and reading it through the map would leave the whole shard
+/// resident in this process (and counted in its RSS).
+struct Cursor {
+    table: std::io::BufReader<File>,
+    post: std::io::BufReader<File>,
+    ntri: usize,
+    post_len: usize,
+    /// Index of the table entry `cur` is, and the one after it.
+    at: usize,
+    cur: Option<(Tri, u32)>,
+    next: Option<(Tri, u32)>,
+}
+
+impl Cursor {
+    fn open(s: &Shard) -> std::io::Result<Cursor> {
+        use std::io::{Seek, SeekFrom};
+        let mut t = File::open(&s.path)?;
+        t.seek(SeekFrom::Start(s.table_off as u64))?;
+        let mut p = File::open(&s.path)?;
+        p.seek(SeekFrom::Start(s.post_off as u64))?;
+        let mut c = Cursor {
+            table: std::io::BufReader::with_capacity(1 << 16, t),
+            post: std::io::BufReader::with_capacity(1 << 16, p),
+            ntri: s.ntri,
+            post_len: s.post_len,
+            at: 0,
+            cur: None,
+            next: None,
+        };
+        c.cur = c.read_entry()?;
+        c.next = c.read_entry()?;
+        Ok(c)
+    }
+
+    fn read_entry(&mut self) -> std::io::Result<Option<(Tri, u32)>> {
+        use std::io::Read;
+        if self.at >= self.ntri {
+            return Ok(None);
+        }
+        self.at += 1;
+        let mut b = [0u8; 8];
+        self.table.read_exact(&mut b)?;
+        Ok(Some((u32_at(&b, 0), u32_at(&b, 4))))
+    }
+
+    /// Advance past the current trigram without reading its postings.
+    fn skip(&mut self) -> std::io::Result<()> {
+        self.cur = self.next;
+        self.next = self.read_entry()?;
+        Ok(())
+    }
+
+    /// The posting list of the current trigram; advances to the next.
+    fn take(&mut self, out: &mut Vec<u8>) -> std::io::Result<()> {
+        use std::io::Read;
+        let (_, start) = self.cur.expect("cursor past the end");
+        let end = self.next.map_or(self.post_len as u32, |(_, o)| o);
+        if end < start {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "corrupt shard",
+            ));
+        }
+        out.resize((end - start) as usize, 0);
+        self.post.read_exact(out)?;
+        self.cur = self.next;
+        self.next = self.read_entry()?;
+        Ok(())
+    }
+}
+
+/// Decode a posting list into (doc id, next-byte mask) pairs.
+fn decode_masks(bytes: &[u8], out: &mut Vec<(u32, u8)>) {
+    out.clear();
+    let mut cur: i64 = -1;
+    let (mut v, mut shift) = (0u64, 0u32);
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        i += 1;
+        v |= ((b & 0x7f) as u64) << shift;
+        if b & 0x80 == 0 {
+            cur += v as i64 + 1;
+            out.push((cur as u32, bytes.get(i).copied().unwrap_or(0)));
+            i += 1;
+            v = 0;
+            shift = 0;
+        } else {
+            shift += 7;
+        }
+    }
+}
+
+/// Write one shard holding the kept documents of `inputs`, in path order,
+/// without reading any source file: posting lists are decoded, renumbered
+/// and re-encoded. Used to drop deleted or changed documents from a unit's
+/// shards (an incremental rebuild) and to combine small shards. A path kept
+/// in more than one input is taken from the last of them. Returns the number
+/// of documents written.
+pub fn merge(inputs: &[MergeInput<'_>], path: &Path) -> std::io::Result<usize> {
+    use std::io::{Seek, SeekFrom};
+    if crate::engine::FAIL_SHARD_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(std::io::Error::other("simulated disk write failure"));
+    }
+    // The kept documents, sorted by path; a later input wins a duplicate.
+    let mut docs: Vec<(DocRef<'_>, usize, u32)> = Vec::new();
+    for (k, inp) in inputs.iter().enumerate() {
+        for id in 0..inp.shard.ndocs() {
+            if inp
+                .alive
+                .is_some_and(|a| !a.get(id).copied().unwrap_or(false))
+            {
+                continue;
+            }
+            if let Some(d) = inp.shard.doc(id) {
+                docs.push((d, k, id as u32));
+            }
+        }
+    }
+    docs.sort_by(|a, b| a.0.rel.cmp(b.0.rel).then(a.1.cmp(&b.1)));
+    let mut keep = vec![true; docs.len()];
+    for i in 1..docs.len() {
+        if docs[i - 1].0.rel == docs[i].0.rel {
+            keep[i - 1] = false;
+        }
+    }
+    let mut remap: Vec<Vec<u32>> = inputs
+        .iter()
+        .map(|i| vec![u32::MAX; i.shard.ndocs()])
+        .collect();
+    let mut docbuf = Vec::new();
+    let mut n = 0u32;
+    for (i, (d, k, id)) in docs.iter().enumerate() {
+        if !keep[i] {
+            continue;
+        }
+        remap[*k][*id as usize] = n;
+        n += 1;
+        docbuf.extend_from_slice(&(d.rel.len() as u32).to_le_bytes());
+        docbuf.extend_from_slice(d.rel.as_bytes());
+        docbuf.extend_from_slice(&d.size.to_le_bytes());
+        docbuf.extend_from_slice(&d.mtime_ns.to_le_bytes());
+    }
+    let ndocs = n as usize;
+    drop(docs);
+
+    // Trigrams of the output: the union of the input tables (a trigram whose
+    // documents were all dropped keeps an empty posting list; harmless).
+    let mut cursors = Vec::with_capacity(inputs.len());
+    for inp in inputs {
+        cursors.push(Cursor::open(inp.shard)?);
+    }
+    // The union of the input tables, counted by a merge of their (sorted)
+    // trigram streams.
+    let ntri = {
+        let mut cs = Vec::with_capacity(inputs.len());
+        for inp in inputs {
+            cs.push(Cursor::open(inp.shard)?);
+        }
+        let mut n = 0usize;
+        while let Some(t) = cs.iter().filter_map(|c| c.cur.map(|x| x.0)).min() {
+            n += 1;
+            for c in cs.iter_mut() {
+                if c.cur.map(|x| x.0) == Some(t) {
+                    c.skip()?;
+                }
+            }
+        }
+        n
+    };
+
+    let tmp = path.with_extension("tmp");
+    let res = (|| -> std::io::Result<()> {
+        let mut w = std::io::BufWriter::with_capacity(1 << 20, File::create(&tmp)?);
+        w.write_all(MAGIC)?;
+        w.write_all(&(ndocs as u32).to_le_bytes())?;
+        w.write_all(&(ntri as u32).to_le_bytes())?;
+        w.write_all(&(docbuf.len() as u64).to_le_bytes())?;
+        w.write_all(&((ntri * 8) as u64).to_le_bytes())?;
+        w.write_all(&0u64.to_le_bytes())?; // post_len, patched below
+        w.write_all(&docbuf)?;
+        let table_off = (HEADER + docbuf.len()) as u64;
+        w.seek(SeekFrom::Start(table_off + (ntri * 8) as u64))?;
+        // The table is streamed through a second handle on the same file.
+        let mut tw = std::io::BufWriter::with_capacity(
+            1 << 16,
+            std::fs::OpenOptions::new().write(true).open(&tmp)?,
+        );
+        tw.seek(SeekFrom::Start(table_off))?;
+        let mut emitted = 0usize;
+        let (mut raw, mut ids, mut merged, mut enc) =
+            (Vec::new(), Vec::new(), Vec::<(u32, u8)>::new(), Vec::new());
+        let mut off: u64 = 0;
+        while let Some(t) = cursors.iter().filter_map(|c| c.cur.map(|x| x.0)).min() {
+            merged.clear();
+            let mut sources = 0;
+            for (k, c) in cursors.iter_mut().enumerate() {
+                if c.cur.map(|x| x.0) != Some(t) {
+                    continue;
+                }
+                c.take(&mut raw)?;
+                decode_masks(&raw, &mut ids);
+                let before = merged.len();
+                for &(id, m) in &ids {
+                    if let Some(&nid) = remap[k].get(id as usize) {
+                        if nid != u32::MAX {
+                            merged.push((nid, m));
+                        }
+                    }
+                }
+                if merged.len() > before {
+                    sources += 1;
+                }
+            }
+            if sources > 1 {
+                merged.sort_unstable_by_key(|x| x.0);
+            }
+            enc.clear();
+            let mut last: i64 = -1;
+            for &(id, m) in &merged {
+                put_varint(&mut enc, (id as i64 - last - 1) as u64);
+                enc.push(m);
+                last = id as i64;
+            }
+            tw.write_all(&t.to_le_bytes())?;
+            tw.write_all(&(off as u32).to_le_bytes())?;
+            emitted += 1;
+            off += enc.len() as u64;
+            if off > u32::MAX as u64 {
+                return Err(std::io::Error::other("shard postings exceed 4 GiB"));
+            }
+            w.write_all(&enc)?;
+        }
+        if emitted != ntri {
+            return Err(std::io::Error::other("merge: trigram count changed"));
+        }
+        tw.flush()?;
+        tw.get_ref().sync_all().ok();
+        drop(tw);
+        w.seek(SeekFrom::Start(32))?;
+        w.write_all(&off.to_le_bytes())?;
+        w.flush()?;
+        w.get_ref().sync_all().ok();
+        Ok(())
+    })();
+    if let Err(e) = res {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(ndocs)
+}
+
 fn intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
     let (mut i, mut j, mut out) = (0, 0, Vec::new());
     while i < a.len() && j < b.len() {
@@ -437,5 +737,114 @@ mod tests {
             s.eval(&trigram::plan("update", true).unwrap()),
             Some(vec![0, 1])
         );
+    }
+
+    fn build(dir: &Path, name: &str, docs: &[(&str, &str)]) -> Shard {
+        let mut b = ShardBuilder::new();
+        for (rel, body) in docs {
+            b.add(
+                DocMeta {
+                    rel: rel.to_string(),
+                    size: body.len() as u64,
+                    mtime_ns: 7,
+                },
+                body.as_bytes(),
+            );
+        }
+        let p = dir.join(name);
+        b.write(&p).unwrap();
+        Shard::open(&p).unwrap()
+    }
+
+    fn rels(s: &Shard, ids: Option<Vec<u32>>) -> Vec<String> {
+        match ids {
+            Some(v) => v
+                .into_iter()
+                .map(|i| s.doc(i as usize).unwrap().rel.to_string())
+                .collect(),
+            None => s.docs().map(|d| d.rel.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn merge_drops_dead_documents_and_equals_a_fresh_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = build(
+            dir.path(),
+            "a.shard",
+            &[
+                ("a/1", "hello world"),
+                ("c/3", "updateAvailable"),
+                ("d/4", "gone soon"),
+            ],
+        );
+        let b = build(
+            dir.path(),
+            "b.shard",
+            &[
+                ("b/2", "say hello"),
+                ("c/3", "update; available"),
+                ("e/5", ""),
+            ],
+        );
+        // c/3 is in both: the later input wins. d/4 is dropped.
+        let alive_a = [true, true, false];
+        let out = dir.path().join("m.shard");
+        let n = merge(
+            &[
+                MergeInput {
+                    shard: &a,
+                    alive: Some(&alive_a),
+                },
+                MergeInput {
+                    shard: &b,
+                    alive: None,
+                },
+            ],
+            &out,
+        )
+        .unwrap();
+        assert_eq!(n, 4);
+        let m = Shard::open(&out).unwrap();
+        let want = build(
+            dir.path(),
+            "w.shard",
+            &[
+                ("a/1", "hello world"),
+                ("b/2", "say hello"),
+                ("c/3", "update; available"),
+                ("e/5", ""),
+            ],
+        );
+        // Documents in path order, same metadata.
+        assert_eq!(rels(&m, None), rels(&want, None));
+        for pat in [
+            "hello",
+            "updateavailable",
+            "update",
+            "gone",
+            "world|say",
+            "zzz",
+        ] {
+            let p = trigram::plan(pat, true).unwrap();
+            assert_eq!(rels(&m, m.eval(&p)), rels(&want, want.eval(&p)), "{pat}");
+        }
+        // Merging nothing alive gives an empty, valid shard.
+        let none = [false, false, false];
+        let out2 = dir.path().join("empty.shard");
+        assert_eq!(
+            merge(
+                &[MergeInput {
+                    shard: &a,
+                    alive: Some(&none)
+                }],
+                &out2
+            )
+            .unwrap(),
+            0
+        );
+        let e = Shard::open(&out2).unwrap();
+        assert_eq!(e.ndocs(), 0);
+        assert_eq!(e.eval(&trigram::plan("hello", true).unwrap()), Some(vec![]));
     }
 }

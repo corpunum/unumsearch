@@ -90,6 +90,16 @@ pub enum Change {
 
 const MAX_PENDING: usize = 2000;
 
+/// Most threads one rebuild uses (reading files and merging shards). Each
+/// reading thread also gets at least [`BUILD_THREAD_MB`] of the memory
+/// budget, so the default budget (96 MiB) allows 4.
+const MAX_BUILD_THREADS: usize = 8;
+const BUILD_THREAD_MB: u64 = 24;
+
+/// A file whose change stamp is within this of the moment it was read is
+/// "racily clean": see [`Engine::build_pieces`].
+const RACY_NS: i64 = 2_000_000_000;
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Manifest {
     pub version: u32,
@@ -152,6 +162,13 @@ pub struct Engine {
     /// and before the new shards are published (emulates a slow disk, e.g.
     /// `F_FULLFSYNC` on macOS, which makes the rebuild window long).
     build_stall_ms: AtomicU64,
+    /// Shard size the merge aims for (test hook: [`Engine::set_build_sizes`]).
+    shard_target: AtomicU64,
+    /// Test hook: flush a reading thread's pieces at this many bytes (0: from
+    /// the memory budget).
+    piece_flush: AtomicU64,
+    /// See [`RACY_NS`] (test hook: [`Engine::set_racy_window_ns`]).
+    racy_ns: AtomicU64,
 }
 
 /// A held query slot; dropping it lets a waiting query run.
@@ -367,6 +384,69 @@ fn finish_build(u: &mut UnitState) {
     u.build_dirty_since_ms = 0;
 }
 
+/// What an incremental rebuild keeps and what it reads again.
+struct Plan {
+    /// Per old shard, per document: still current (path, size and mtime as
+    /// listed, and not reported changed by an event).
+    alive: Vec<Vec<bool>>,
+    /// How many documents are kept, and their content bytes.
+    alive_docs: usize,
+    alive_bytes: u64,
+    /// Indices into the listing of the files to (re)index.
+    reindex: Vec<usize>,
+}
+
+/// Compare a listing with the documents of the current shards. A document
+/// stays when the listing has its path with the same size and mtime and no
+/// event reported it changed (`pending`: an edit within the filesystem's
+/// timestamp granularity keeps the mtime, the event still says it changed).
+/// Everything else in the listing is read again; documents not kept are
+/// dropped (deleted, changed, or no longer part of the corpus).
+fn incremental_plan(
+    old: &[Shard],
+    files: &[FileEntry],
+    pending: &std::collections::BTreeSet<String>,
+) -> Plan {
+    let mut at: HashMap<&str, (usize, u32, u64, i64)> = HashMap::new();
+    for (k, s) in old.iter().enumerate() {
+        for id in 0..s.ndocs() {
+            if let Some(d) = s.doc(id) {
+                at.insert(d.rel, (k, id as u32, d.size, d.mtime_ns));
+            }
+        }
+    }
+    let mut alive: Vec<Vec<bool>> = old.iter().map(|s| vec![false; s.ndocs()]).collect();
+    let mut reindex = Vec::new();
+    let (mut alive_docs, mut alive_bytes) = (0usize, 0u64);
+    for (i, f) in files.iter().enumerate() {
+        match at.get(f.rel.as_str()) {
+            Some(&(k, id, size, mtime))
+                if size == f.size && mtime == f.mtime_ns && !pending.contains(&f.rel) =>
+            {
+                alive[k][id as usize] = true;
+                alive_docs += 1;
+                alive_bytes += size;
+            }
+            _ => reindex.push(i),
+        }
+    }
+    Plan {
+        alive,
+        alive_docs,
+        alive_bytes,
+        reindex,
+    }
+}
+
+/// Shards are combined up to about this size on disk: a few large shards
+/// per unit (a query looks every trigram up once per shard), small enough
+/// that rewriting the one holding a changed file stays cheap.
+const SHARD_TARGET: u64 = 64 << 20;
+
+/// Clean shards under half of [`SHARD_TARGET`] a unit may keep before a
+/// rebuild combines them.
+const MAX_SMALL_SHARDS: usize = 8;
+
 /// A source of candidates: a unit's path, its shards and its pending
 /// (changed since build) files, snapshotted under the lock.
 struct Src {
@@ -508,6 +588,9 @@ impl Engine {
             doc_sets: Mutex::new(HashMap::new()),
             last_gen: AtomicU64::new(now_ms()),
             build_stall_ms: AtomicU64::new(0),
+            shard_target: AtomicU64::new(SHARD_TARGET),
+            piece_flush: AtomicU64::new(0),
+            racy_ns: AtomicU64::new(RACY_NS as u64),
             anchors: OnceLock::new(),
             running: (Mutex::new(0), std::sync::Condvar::new()),
             splits: OnceLock::new(),
@@ -902,6 +985,17 @@ impl Engine {
         }
     }
 
+    /// Is every change to `unit` already "unknown" (it will be re-listed
+    /// whole, and a running rebuild will be followed by another)? Then a
+    /// further event can only move its quiet period, and the watcher need not
+    /// work out what the event changed.
+    pub fn unknown_dirty(&self, unit: &str) -> bool {
+        let g = self.inner.read().unwrap();
+        g.m.units
+            .get(unit)
+            .is_some_and(|u| u.dirty && u.pending_unknown && (!u.building || u.build_unknown))
+    }
+
     /// Persist dirty/pending state for reader processes.
     pub fn publish_state(&self) {
         self.save_manifest();
@@ -957,6 +1051,8 @@ impl Engine {
         let _guard = self.build_lock.lock().unwrap();
         let prev_fp;
         let prev_shards;
+        let pending_at_start: std::collections::BTreeSet<String>;
+        let (dirty_age_ms, quiet_ms);
         {
             let mut g = self.inner.write().unwrap();
             let u = g.m.units.get_mut(unit)?;
@@ -970,7 +1066,14 @@ impl Engine {
             u.build_unknown = false;
             u.build_dirty_since_ms = 0;
             prev_fp = u.fingerprint;
+            dirty_age_ms = if u.dirty {
+                now_ms().saturating_sub(u.dirty_since_ms)
+            } else {
+                0
+            };
+            quiet_ms = now_ms().saturating_sub(u.last_event_ms);
             prev_shards = u.shards.clone();
+            pending_at_start = u.pending.clone();
         }
         // A failed rebuild keeps the old index, keeps every change that was
         // pending, and marks the unit not fresh until a later build succeeds.
@@ -1016,6 +1119,7 @@ impl Engine {
         } else {
             walk::list(&self.cfg, &root)
         };
+        let t_list = t0.elapsed();
         let stall = self.build_stall_ms.load(Ordering::Relaxed);
         if stall > 0 {
             std::thread::sleep(Duration::from_millis(stall));
@@ -1034,63 +1138,79 @@ impl Engine {
             return Some(files);
         }
 
-        let budget = (self.cfg.max_memory_mb.max(16) as usize) << 20;
-        // Postings are roughly a third of the builder's footprint at flush time.
-        let flush_at = budget / 3;
         let gen = self.next_generation();
         let prefix = unit_prefix(unit);
-        let mut names = Vec::new();
-        let mut b = ShardBuilder::new();
-        let mut total = 0u64;
-        let mut binary = 0usize;
-        let mut docs = 0usize;
-        let mut err: Option<String> = None;
-        for f in &files {
-            let content = match std::fs::read(root.join(&f.rel)) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            // ripgrep's default: a NUL byte marks a binary file, not searched.
-            if memchr0(&content) {
-                binary += 1;
-                continue;
+        // Incremental unless forced: documents whose path, size and mtime are
+        // unchanged since the last build (and that no event reported as
+        // changed) keep their postings; only the rest of the listing is read.
+        let old: Option<Arc<Vec<Shard>>> = if force {
+            None
+        } else {
+            let g = self.inner.read().unwrap();
+            g.shards
+                .get(unit)
+                .filter(|v| v.len() == prev_shards.len() && !v.is_empty())
+                .cloned()
+        };
+        let plan = match &old {
+            Some(o) => incremental_plan(o, &files, &pending_at_start),
+            None => Plan {
+                alive: vec![],
+                alive_docs: 0,
+                alive_bytes: 0,
+                reindex: (0..files.len()).collect(),
+            },
+        };
+        let mut written: Vec<String> = Vec::new();
+        let built = self.build_pieces(&root, &files, &plan.reindex, &prefix, gen, &mut written);
+        let (pieces, added_docs, added_bytes) = match built {
+            Ok(x) => x,
+            Err(e) => return fail(e, &written),
+        };
+        let t_pieces = t0.elapsed();
+        let names = match self.compose(
+            old.as_deref().map(|v| v.as_slice()).unwrap_or(&[]),
+            &plan.alive,
+            &pieces,
+            &prefix,
+            gen,
+            &mut written,
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                // Unmap before removing (Windows refuses to delete a mapped file).
+                drop(pieces);
+                return fail(e, &written);
             }
-            total += content.len() as u64;
-            docs += 1;
-            b.add(
-                DocMeta {
-                    rel: f.rel.clone(),
-                    size: f.size,
-                    mtime_ns: f.mtime_ns,
-                },
-                &content,
+        };
+        let npieces = pieces.len();
+        drop(pieces);
+        if std::env::var_os("UNUMSEARCH_DEBUG_BUILD").is_some() {
+            eprintln!(
+                "build {unit}: dirty for {dirty_age_ms} ms, quiet {quiet_ms} ms; listed {} in {t_list:?}, reindex {} pieces {} at {:?}, composed {} at {:?}",
+                files.len(),
+                plan.reindex.len(),
+                npieces,
+                t_pieces,
+                names.len(),
+                t0.elapsed()
             );
-            if b.memory() >= flush_at {
-                let name = format!("{prefix}-{gen}-{}.shard", names.len());
-                if let Err(e) = std::mem::take(&mut b).write(&self.dir.join(&name)) {
-                    err = Some(e.to_string());
-                    break;
-                }
-                names.push(name);
-            }
         }
-        if err.is_none() && !b.is_empty() {
-            let name = format!("{prefix}-{gen}-{}.shard", names.len());
-            match b.write(&self.dir.join(&name)) {
-                Ok(()) => names.push(name),
-                Err(e) => err = Some(e.to_string()),
+        // Intermediate pieces folded into the final shards.
+        for n in &written {
+            if !names.contains(n) {
+                let _ = std::fs::remove_file(self.dir.join(n));
             }
-        }
-        if let Some(e) = err {
-            return fail(e, &names);
         }
         let mut opened = Vec::new();
         for n in &names {
             match Shard::open(&self.dir.join(n)) {
                 Ok(s) => opened.push(s),
-                Err(e) => return fail(format!("new shard {n} unreadable: {e}"), &names),
+                Err(e) => return fail(format!("new shard {n} unreadable: {e}"), &written),
             }
         }
+        let (docs, total) = (plan.alive_docs + added_docs, plan.alive_bytes + added_bytes);
+        drop(old);
         self.doc_sets.lock().unwrap().remove(unit);
         {
             let mut g = self.inner.write().unwrap();
@@ -1103,7 +1223,7 @@ impl Engine {
                 u.fingerprint = fp;
                 u.files = docs;
                 u.bytes = total;
-                u.binary_skipped = binary;
+                u.binary_skipped = files.len().saturating_sub(docs);
                 u.indexed_at_ms = now_ms();
                 u.build_ms = t0.elapsed().as_millis() as u64;
                 u.ready = true;
@@ -1127,6 +1247,263 @@ impl Engine {
             let _ = std::fs::remove_file(self.dir.join(s));
         }
         Some(files)
+    }
+
+    /// Threads a rebuild may use: the configured count, at most
+    /// [`MAX_BUILD_THREADS`], and at most one per [`BUILD_THREAD_MB`] of the
+    /// memory budget.
+    fn build_threads(&self) -> usize {
+        self.cfg
+            .thread_count()
+            .min(MAX_BUILD_THREADS)
+            .min((self.cfg.max_memory_mb / BUILD_THREAD_MB) as usize)
+            .max(1)
+    }
+
+    /// Index `files[idx]` (in listing order) into new shard files ("pieces"),
+    /// on up to `thread_count()` threads. Each thread claims consecutive
+    /// blocks in increasing order, so each of its pieces is in path order.
+    /// The memory budget is shared by the threads. Returns the opened pieces,
+    /// and how many documents (and content bytes) they hold.
+    fn build_pieces(
+        &self,
+        root: &Path,
+        files: &[FileEntry],
+        idx: &[usize],
+        prefix: &str,
+        gen: u64,
+        written: &mut Vec<String>,
+    ) -> Result<(Vec<Shard>, usize, u64), String> {
+        if idx.is_empty() {
+            return Ok((vec![], 0, 0));
+        }
+        const BLOCK: usize = 64;
+        let threads = self.build_threads().min(idx.len().div_ceil(BLOCK));
+        let budget = (self.cfg.max_memory_mb.max(16) as usize) << 20;
+        // Postings are roughly a third of a builder's footprint at flush time.
+        let flush_at = match self.piece_flush.load(Ordering::Relaxed) {
+            0 => budget / 3 / threads,
+            n => n as usize,
+        };
+        let racy_ns = self.racy_ns.load(Ordering::Relaxed) as i64;
+        let next = AtomicUsize::new(0);
+        let seq = AtomicUsize::new(0);
+        let failed: Mutex<Option<String>> = Mutex::new(None);
+        let out: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let (ndocs, nbytes) = (AtomicUsize::new(0), AtomicU64::new(0));
+        let work = || {
+            let mut b = ShardBuilder::new();
+            let flush = |b: ShardBuilder| -> bool {
+                let name = format!(
+                    "{prefix}-{gen}-p{}.shard",
+                    seq.fetch_add(1, Ordering::Relaxed)
+                );
+                out.lock().unwrap().push(name.clone());
+                if let Err(e) = b.write(&self.dir.join(&name)) {
+                    *failed.lock().unwrap() = Some(e.to_string());
+                    return false;
+                }
+                true
+            };
+            'claim: loop {
+                if failed.lock().unwrap().is_some() {
+                    return;
+                }
+                let start = next.fetch_add(BLOCK, Ordering::Relaxed);
+                if start >= idx.len() {
+                    break;
+                }
+                for &i in &idx[start..(start + BLOCK).min(idx.len())] {
+                    let f = &files[i];
+                    let read_at = now_ms() as i64 * 1_000_000;
+                    let content = match std::fs::read(root.join(&f.rel)) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    // ripgrep's default: a NUL byte marks a binary file, not searched.
+                    if memchr0(&content) {
+                        continue;
+                    }
+                    ndocs.fetch_add(1, Ordering::Relaxed);
+                    nbytes.fetch_add(content.len() as u64, Ordering::Relaxed);
+                    // "Racily clean" (as git calls it): stamped so close to
+                    // the read that a later write could keep the stamp (a
+                    // coarse filesystem clock). Stored as never matching, so
+                    // the next rebuild reads it again.
+                    let racy = f.mtime_ns > read_at - racy_ns;
+                    b.add(
+                        DocMeta {
+                            rel: f.rel.clone(),
+                            size: f.size,
+                            mtime_ns: if racy { -1 } else { f.mtime_ns },
+                        },
+                        &content,
+                    );
+                    if b.memory() >= flush_at && !flush(std::mem::take(&mut b)) {
+                        break 'claim;
+                    }
+                }
+            }
+            if !b.is_empty() {
+                flush(b);
+            }
+        };
+        if threads == 1 {
+            work();
+        } else {
+            std::thread::scope(|sc| {
+                for _ in 0..threads {
+                    sc.spawn(work);
+                }
+            });
+        }
+        let names = out.into_inner().unwrap();
+        written.extend(names.iter().cloned());
+        if let Some(e) = failed.into_inner().unwrap() {
+            return Err(e);
+        }
+        let mut pieces = Vec::with_capacity(names.len());
+        for n in &names {
+            pieces.push(
+                Shard::open(&self.dir.join(n))
+                    .map_err(|e| format!("new shard {n} unreadable: {e}"))?,
+            );
+        }
+        Ok((pieces, ndocs.into_inner(), nbytes.into_inner()))
+    }
+
+    /// The unit's new shard list: old shards (keeping only their `alive`
+    /// documents) plus new pieces, combined by [`shard::merge`] into shards
+    /// of about [`SHARD_TARGET`]. An old shard with nothing dropped is kept as
+    /// it is (same file) unless there are too many small ones; everything
+    /// else is merged in groups, the groups in parallel. No source file is
+    /// read here.
+    fn compose(
+        &self,
+        old: &[Shard],
+        alive: &[Vec<bool>],
+        pieces: &[Shard],
+        prefix: &str,
+        gen: u64,
+        written: &mut Vec<String>,
+    ) -> Result<Vec<String>, String> {
+        let file_name = |s: &Shard| {
+            s.path()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        };
+        let mut names = Vec::new();
+        // (input, estimated size after dropping) to merge.
+        let target = self.shard_target.load(Ordering::Relaxed);
+        // Shards with nothing to drop are kept as they are, unless more than
+        // MAX_SMALL_SHARDS of them are under half the target: then those are
+        // combined too (each such pass combines them into fewer, so this
+        // settles within a few rebuilds and does not recur).
+        let small_clean = old
+            .iter()
+            .enumerate()
+            .filter(|(k, s)| {
+                (s.disk_bytes() as u64) < target / 2
+                    && alive.get(*k).is_none_or(|a| a.iter().all(|x| *x))
+            })
+            .count();
+        let compact = small_clean > MAX_SMALL_SHARDS;
+        let mut todo: Vec<(crate::shard::MergeInput<'_>, u64)> = Vec::new();
+        for (k, s) in old.iter().enumerate() {
+            let a = alive.get(k).map(|v| v.as_slice());
+            let kept = a.map_or(s.ndocs(), |a| a.iter().filter(|x| **x).count());
+            if kept == 0 {
+                continue;
+            }
+            let size = s.disk_bytes() as u64;
+            if kept == s.ndocs() && (size >= target / 2 || !compact) {
+                names.push(file_name(s));
+                continue;
+            }
+            let est = size * kept as u64 / s.ndocs().max(1) as u64;
+            let alive = if kept == s.ndocs() { None } else { a };
+            todo.push((crate::shard::MergeInput { shard: s, alive }, est));
+        }
+        for p in pieces {
+            todo.push((
+                crate::shard::MergeInput {
+                    shard: p,
+                    alive: None,
+                },
+                p.disk_bytes() as u64,
+            ));
+        }
+        // First-fit decreasing into groups of about SHARD_TARGET.
+        todo.sort_by_key(|x| std::cmp::Reverse(x.1));
+        let mut groups: Vec<(Vec<crate::shard::MergeInput<'_>>, u64)> = Vec::new();
+        for (inp, est) in todo {
+            match groups.iter_mut().find(|g| g.1 + est <= target) {
+                Some(g) => {
+                    g.0.push(inp);
+                    g.1 += est;
+                }
+                None => groups.push((vec![inp], est)),
+            }
+        }
+        let mut jobs = Vec::new();
+        for (i, (g, _)) in groups.into_iter().enumerate() {
+            // A lone shard with nothing to drop is already what a merge
+            // would write.
+            if g.len() == 1 && g[0].alive.is_none() {
+                names.push(file_name(g[0].shard));
+                continue;
+            }
+            jobs.push((format!("{prefix}-{gen}-{i}.shard"), g));
+        }
+        let threads = self.build_threads();
+        let next = AtomicUsize::new(0);
+        let errs: Mutex<Vec<String>> = Mutex::new(Vec::new());
+        let run = || loop {
+            let j = next.fetch_add(1, Ordering::Relaxed);
+            let Some((name, inputs)) = jobs.get(j) else {
+                break;
+            };
+            if let Err(e) = crate::shard::merge(inputs, &self.dir.join(name)) {
+                errs.lock().unwrap().push(e.to_string());
+            }
+        };
+        if threads == 1 || jobs.len() <= 1 {
+            run();
+        } else {
+            std::thread::scope(|sc| {
+                for _ in 0..threads.min(jobs.len()) {
+                    sc.spawn(run);
+                }
+            });
+        }
+        for (n, _) in &jobs {
+            written.push(n.clone());
+            names.push(n.clone());
+        }
+        if let Some(e) = errs.into_inner().unwrap().pop() {
+            return Err(e);
+        }
+        names.sort();
+        Ok(names)
+    }
+
+    /// Test hook: aim merged shards at `shard_target` bytes and flush each
+    /// reading thread's piece at `piece_flush` bytes of builder memory, so a
+    /// small corpus exercises many pieces and merge groups.
+    #[doc(hidden)]
+    pub fn set_build_sizes(&self, shard_target: u64, piece_flush: u64) {
+        self.shard_target
+            .store(shard_target.max(1), Ordering::Relaxed);
+        self.piece_flush.store(piece_flush, Ordering::Relaxed);
+    }
+
+    /// Test hook: treat files as racily clean only within `ns` of being read
+    /// (0: never), so a test can check that the change stamp alone catches
+    /// rewrites.
+    #[doc(hidden)]
+    pub fn set_racy_window_ns(&self, ns: u64) {
+        self.racy_ns.store(ns, Ordering::Relaxed);
     }
 
     /// Test hook: make every rebuild of this engine take at least `ms`
