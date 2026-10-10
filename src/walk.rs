@@ -17,6 +17,10 @@ pub struct FileEntry {
     /// Path relative to the walk root, '/'-separated.
     pub rel: String,
     pub size: u64,
+    /// Change stamp: the later of the modification and (Unix) status-change
+    /// times. Tools that put an old mtime back (`cp -p`, `touch -d`, archive
+    /// extraction) still move the ctime, so a rewritten file never keeps its
+    /// stamp.
     pub mtime_ns: i64,
 }
 
@@ -58,6 +62,24 @@ pub fn mtime_ns(md: &std::fs::Metadata) -> i64 {
         .unwrap_or(0)
 }
 
+/// The change stamp of [`FileEntry::mtime_ns`].
+pub fn stamp_ns(md: &std::fs::Metadata) -> i64 {
+    let m = mtime_ns(md);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let c = md
+            .ctime()
+            .saturating_mul(1_000_000_000)
+            .saturating_add(md.ctime_nsec());
+        m.max(c)
+    }
+    #[cfg(not(unix))]
+    {
+        m
+    }
+}
+
 /// List the corpus under `root`, sorted by relative path.
 pub fn list(cfg: &Config, root: &Path) -> Vec<FileEntry> {
     list_depth(cfg, root, None)
@@ -96,7 +118,7 @@ pub fn list_depth(cfg: &Config, root: &Path, max_depth: Option<usize>) -> Vec<Fi
                             out.lock().unwrap().push(FileEntry {
                                 rel,
                                 size: md.len(),
-                                mtime_ns: mtime_ns(&md),
+                                mtime_ns: stamp_ns(&md),
                             });
                         }
                     }

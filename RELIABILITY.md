@@ -42,6 +42,16 @@ What unumsearch promises, how that is tested, and how its speed is measured.
    (deterministically) and says `truncated: true`, `complete: false`. The daemon runs at most
    `max_concurrent_queries` searches at once. The watcher never queues read-only events and its
    queue is bounded; an overflow marks every unit dirty instead of growing memory.
+10. **Incremental rebuilds equal full rebuilds.** A rebuild reads again every file whose size or
+    change stamp (the later of mtime and, on Unix, ctime) differs from the indexed document, every
+    file an event reported as changed, and every file that was "racily clean" when last read
+    (stamped within 2 s of the read, so a later write could have kept the stamp). All other
+    documents keep their postings; the shards that held dropped or changed documents are rewritten
+    from their postings without them. The resulting index lists exactly the files, and answers
+    exactly the candidates, a from-scratch build of the same tree would. Not caught: a rewrite
+    that keeps the size and restores the mtime on a platform without ctime (Windows) and whose
+    watcher event was lost; the same blind spot the size/mtime fingerprint of the periodic rescan
+    already had. `unumsearch index --force` rebuilds from scratch.
 
 ## Tests
 
@@ -52,6 +62,7 @@ What unumsearch promises, how that is tested, and how its speed is measured.
 | Roots, secrets, HTTP hardening, shard generations, `files()` limits, overlapping roots, cross-process freshness | `tests/trust.rs` |
 | Simulated disk failure during a rebuild | `tests/trust_failpoint.rs` |
 | Queries during a (deliberately slowed) rebuild keep pending changes exact; changes during a rebuild survive it; the macOS CI failure of issue #6 (seed 1024301) replayed with slow rebuilds | `tests/build_window.rs`, `tests/differential.rs` |
+| Incremental rebuilds: branch switches (thousands of files rewritten, deleted and added, directories appearing and vanishing, ignore-file edits, same-size rewrites with the old mtime put back) rebuilt incrementally must list exactly what a from-scratch build lists and answer exactly like `rg`, with a bounded shard count; shard merging; the sort-free trigram extractor against the sorted one; a reported change with size and mtime unchanged; one edit keeps the other shards | `tests/differential.rs`, `tests/incremental.rs`, `src/shard.rs`, `src/trigram.rs` |
 | Result budget and deterministic truncation, a busy watcher flooded with reads and writes (counting allocator) | `tests/bounded.rs` |
 | CLI, stdio JSON-RPC, MCP | `tests/cli.rs` |
 | Coverage of roots under each exclusion kind (ignore files, excludes, secrets, hidden, size, symlinks, split-root non-unit children) across the engine, API and CLI | `tests/coverage.rs` |
@@ -60,7 +71,7 @@ CI runs all of it on Linux x86_64 and arm64, macOS and Windows. Reproduce or dee
 differential test locally:
 
 ```bash
-UNUMSEARCH_DIFF_CASES=5000 UNUMSEARCH_DIFF_MUTATIONS=100 cargo test --release --test differential -- --nocapture
+UNUMSEARCH_DIFF_CASES=5000 UNUMSEARCH_DIFF_MUTATIONS=100 UNUMSEARCH_DIFF_SWITCHES=200 cargo test --release --test differential -- --nocapture
 UNUMSEARCH_DIFF_SEED=12345 cargo test --test differential static_corpora   # replay one failing seed
 ```
 

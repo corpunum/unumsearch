@@ -557,3 +557,238 @@ fn mutation_case(rg: &str, seed: u64, build_stall_ms: u64) -> usize {
     }
     checked_fresh
 }
+
+/// One side of a simulated branch: path -> content, plus its `.gitignore`.
+struct Branch {
+    files: std::collections::BTreeMap<String, Vec<u8>>,
+    gitignore: String,
+}
+
+fn random_branch(r: &mut Rng, max: usize, n: usize) -> Branch {
+    let mut files = std::collections::BTreeMap::new();
+    for _ in 0..n {
+        let rel = format!(
+            "{}/pkg{}/{}{}",
+            r.pick(DIRS),
+            r.below(12),
+            r.below(40),
+            r.pick(NAMES)
+        );
+        let body = match r.below(20) {
+            0 => b"alpha\0binary hello\n".to_vec(),
+            1 => {
+                let mut v = random_text(r).into_bytes();
+                v.resize(max + 1 + r.below(100), b' ');
+                v
+            }
+            _ => random_text(r).into_bytes(),
+        };
+        files.insert(rel, body);
+    }
+    Branch {
+        files,
+        gitignore: gitignore_text(r),
+    }
+}
+
+/// Derive a second branch: most files kept, some rewritten (some with the
+/// same size and the old mtime put back), some deleted, new ones and new
+/// directories added.
+fn derive_branch(base: &Branch, r: &mut Rng, max: usize) -> Branch {
+    let mut files = std::collections::BTreeMap::new();
+    for (rel, body) in &base.files {
+        match r.below(10) {
+            0 | 1 => {}
+            2..=4 => {
+                let mut b = random_text(r).into_bytes();
+                if r.chance(50) {
+                    b.resize(body.len(), b'z');
+                }
+                files.insert(rel.clone(), b);
+            }
+            _ => {
+                files.insert(rel.clone(), body.clone());
+            }
+        }
+    }
+    let extra = random_branch(r, max, base.files.len() / 3);
+    for (rel, body) in extra.files {
+        files.insert(format!("new{}/{rel}", r.below(3)), body);
+    }
+    Branch {
+        files,
+        gitignore: if r.chance(30) {
+            gitignore_text(r)
+        } else {
+            base.gitignore.clone()
+        },
+    }
+}
+
+/// Make the tree under `root` equal `to` (it currently equals `from`), the
+/// way `git checkout` does: only differing files are written, files that
+/// keep their content keep their mtime, vanished files and emptied
+/// directories are removed. Rewritten files of the same size get their old
+/// mtime back (as `cp -p` or an archive extraction would).
+fn checkout(root: &Path, from: &Branch, to: &Branch) {
+    for rel in from.files.keys() {
+        if !to.files.contains_key(rel) {
+            let p = root.join(rel);
+            let _ = std::fs::remove_file(&p);
+            let mut d = p.parent().map(Path::to_path_buf);
+            while let Some(dir) = d {
+                if dir == root || std::fs::remove_dir(&dir).is_err() {
+                    break;
+                }
+                d = dir.parent().map(Path::to_path_buf);
+            }
+        }
+    }
+    for (rel, body) in &to.files {
+        if from.files.get(rel) == Some(body) {
+            continue;
+        }
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let old = std::fs::metadata(&p).ok();
+        std::fs::write(&p, body).unwrap();
+        // (Unix: the ctime still moves. Windows has no ctime in std; there a
+        // rewrite that restores size and mtime is caught by its watcher event.)
+        if let Some(m) = old.filter(|_| cfg!(unix)) {
+            if m.len() == body.len() as u64 {
+                if let Ok(t) = m.modified() {
+                    let f = std::fs::OpenOptions::new().write(true).open(&p).unwrap();
+                    let _ = f.set_modified(t);
+                }
+            }
+        }
+    }
+    if from.gitignore != to.gitignore {
+        std::fs::write(root.join(".gitignore"), &to.gitignore).unwrap();
+    }
+}
+
+/// (shard files, their total bytes) in an index directory.
+fn shard_files(dir: &Path) -> (usize, u64) {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".shard"))
+        .fold((0, 0), |(n, b), e| {
+            (n + 1, b + e.metadata().map_or(0, |m| m.len()))
+        })
+}
+
+fn listed(e: &Engine, root: &Path) -> Vec<String> {
+    let mut v = e
+        .files(&unumsearch::FilesOpts {
+            root: root.to_path_buf(),
+            max_files: 1_000_000,
+            ..Default::default()
+        })
+        .unwrap()
+        .files;
+    v.sort();
+    v
+}
+
+/// Large change sets (a branch switch) are rebuilt incrementally: unchanged
+/// documents keep their postings, changed and new files are read on several
+/// threads into small pieces, and pieces plus surviving documents are merged.
+/// After every switch the rebuilt index must answer exactly like rg and list
+/// exactly the files a from-scratch build lists, and the shard count must
+/// stay bounded however many switches happen.
+#[test]
+fn branch_switches_rebuild_incrementally_and_match_ripgrep() {
+    let Some(rg) = rg_binary() else {
+        eprintln!("rg not found; skipping differential test");
+        return;
+    };
+    let cases: u64 = std::env::var("UNUMSEARCH_DIFF_SWITCHES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let mut compared = 0usize;
+    for case in 0..cases {
+        let seed = seed_base() + 2_000_000 + case;
+        let mut r = Rng(seed);
+        let t = tempfile::tempdir().unwrap();
+        let root = t.path().join("repo");
+        let max = 400usize;
+        let n = 150 + r.below(250);
+        let a = random_branch(&mut r, max, n);
+        let b = derive_branch(&a, &mut r, max);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        checkout(
+            &root,
+            &Branch {
+                files: Default::default(),
+                gitignore: String::new(),
+            },
+            &a,
+        );
+        std::fs::write(root.join(".gitignore"), &a.gitignore).unwrap();
+        let mut c = cfg(t.path(), &root, max as u64, false);
+        c.threads = 4;
+        let ignore_file = t.path().join("excludes.ignore");
+        std::fs::write(&ignore_file, c.exclude_lines().join("\n")).unwrap();
+        let env = Env {
+            rg: rg.clone(),
+            root: root.clone(),
+            ignore_file,
+            max: max as u64,
+        };
+        let e = Engine::open(c.clone(), true).unwrap();
+        // Tiny pieces and shards: a few hundred files make many of each.
+        const TARGET: u64 = 8 << 10;
+        e.set_build_sizes(TARGET, 4 << 10);
+        // Files here are always read within moments of being written; with
+        // the racily-clean window on, every one would be read again anyway.
+        // Off, rewrites that keep size and mtime must be caught by the
+        // change stamp (ctime) alone.
+        e.set_racy_window_ns(0);
+        e.index_all(false);
+        let mut cur = &a;
+        for round in 0..6 {
+            let next = if round % 2 == 0 { &b } else { &a };
+            checkout(&root, cur, next);
+            cur = next;
+            e.index_all(false);
+            // A from-scratch index of the same tree, for the file listing.
+            let mut c2 = c.clone();
+            c2.index_dir = Some(
+                t.path()
+                    .join(format!("full{round}"))
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+            let full = Engine::open(c2, true).unwrap();
+            full.index_all(true);
+            assert_eq!(
+                listed(&e, &root),
+                listed(&full, &root),
+                "seed {seed} round {round}: incremental listing differs from a full build"
+            );
+            for (pat, regex, ci) in PATTERNS {
+                let want = rg_set(&env, pat, *regex, *ci);
+                let (got, fresh) = engine_answer(&e, &env, pat, *regex, *ci);
+                assert!(fresh, "seed {seed} round {round}: fresh index expected");
+                assert_eq!(
+                    got, want,
+                    "seed {seed} (UNUMSEARCH_DIFF_SEED) round {round} pattern {pat:?} regex={regex} ci={ci}"
+                );
+                compared += 1;
+            }
+            // Merging fills groups first-fit (at most one under half the
+            // target) and at most 8 small clean shards are kept, so the
+            // count stays near size / target.
+            let (n, bytes) = shard_files(&t.path().join("index"));
+            let bound = (2 * bytes / TARGET) as usize + 8 + 2;
+            assert!(
+                n <= bound,
+                "seed {seed} round {round}: {n} shards (bound {bound})"
+            );
+        }
+    }
+    eprintln!("differential(branch switch): {compared} comparisons against rg");
+}

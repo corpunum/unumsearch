@@ -49,13 +49,17 @@ your own code with `python3 bench/race.py --root .` (see [See it yourself](#see-
   by default (overridable).
 - **Always fresh**: a filesystem watcher (`notify`: inotify, FSEvents, ReadDirectoryChangesW)
   marks changed files immediately; they are searched directly until the background rebuild of
-  their unit lands (typically well under a second). A periodic rescan with a size/mtime
+  their unit lands (typically well under a second). A periodic rescan with a size/change-time
   fingerprint catches anything the watcher missed. Every answer says whether it is `fresh`.
 - **Bounded resources**: a configurable build-memory budget, mmapped read-only shards (index
   pages are reclaimable page cache, not heap), compact on-disk format (delta/varint postings with
   an 8-bit next-byte mask per posting that removes most false-positive candidates).
 - **Units**: each root is indexed as a unit; a *split root* (a folder of many checkouts) makes
   each child its own unit, so a change rebuilds one checkout, not all of them.
+- **Incremental rebuilds**: a rebuild reads again only the files whose size or change time moved
+  (on several threads) and keeps the postings of everything else, so a branch switch on an
+  81k-file kernel tree is indexed again in 3 to 4 s after the checkout, not by re-reading the
+  whole tree (20 to 36 s with v0.1.6).
 - **One writer, many readers**: a lock file elects one writer per index directory; CLI
   invocations and MCP servers open the same index read-only and reload it when it changes.
 - **Graceful fallbacks**: a directory the index does not cover is scanned directly with the same
@@ -76,11 +80,11 @@ curl -fsSL https://github.com/corpunum/unumsearch/releases/latest/download/insta
 irm https://github.com/corpunum/unumsearch/releases/latest/download/install.ps1 | iex
 ```
 
-`UNUMSEARCH_VERSION=v0.1.6` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
+`UNUMSEARCH_VERSION=v0.1.7` pins a version, `UNUMSEARCH_INSTALL_DIR` changes the destination.
 Every archive and `SHA256SUMS` also carry a GitHub build-provenance attestation:
 
 ```bash
-gh attestation verify unumsearch-v0.1.6-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
+gh attestation verify unumsearch-v0.1.7-x86_64-unknown-linux-musl.tar.gz --repo corpunum/unumsearch
 ```
 
 Each archive contains the binary, this README, the license, `config.example.toml`, the Agent
@@ -89,7 +93,7 @@ Skill (`skills/`) and the systemd unit (`packaging/`).
 From source (Rust 1.89 or newer):
 
 ```bash
-cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.6
+cargo install --git https://github.com/corpunum/unumsearch --tag v0.1.7
 # or
 git clone https://github.com/corpunum/unumsearch && cd unumsearch
 cargo build --release            # target/release/unumsearch
@@ -302,7 +306,7 @@ request surface every front-end uses.
 ## How it works
 
 - **Index**: per unit, one or more shards. A shard holds the document table (relative path, size,
-  mtime) and, for every byte trigram of the content (ASCII case-folded), a delta/varint posting
+  change time) and, for every byte trigram of the content (ASCII case-folded), a delta/varint posting
   list of documents, each with an 8-bit mask of the bytes that follow that trigram in the
   document. Shards are written to a temporary file and renamed into place, then mmapped.
 - **Queries**: the pattern is parsed with `regex-syntax` and turned into a boolean formula over
@@ -314,6 +318,13 @@ request surface every front-end uses.
   against the corpus rules (gitignore, excludes, size): churn in ignored files does not make a unit
   dirty. Changed files are searched directly until the unit's rebuild (debounced) replaces its
   shards; directory moves and ignore-file edits mark the unit not fresh until then.
+- **Rebuilds**: the unit is listed again and compared with its indexed documents (path, size,
+  change time = the later of mtime and ctime). Only new and changed files, and files an event
+  reported, are read, on up to 8 threads (one per 24 MiB of `max_memory_mb`: 4 by default),
+  into small shards; those and the surviving documents of the old shards are merged into shards of about
+  64 MB by decoding and renumbering posting lists, without reading any file. Shards with nothing
+  dropped are kept as they are, so one edit rewrites one shard. `index --force` rebuilds from
+  scratch. The new shards replace the old ones in one step, as before.
 
 ## Benchmarks
 
@@ -383,37 +394,57 @@ What does an agent get if it keeps searching while a checkout replaces thousands
 tree, then switches `--from` -> `--to` -> `--from` while one client sends the queries back to back
 over HTTP. Every answer's latency and `fresh`/`complete` flags are recorded, and every answer that
 started after the checkout finished and claimed `fresh` + `complete` is compared with rg on the
-new tree. Measured 2026-10-09, v0.1.6, same machine as above (a local LLM serving throughout),
-warm cache, files-only regex queries, two directions per pair (shown as `a / b`).
+new tree. Measured 2026-10-10, v0.1.6 against v0.1.7 run back to back on the same clones, same
+machine as above (a local LLM serving throughout), warm cache, files-only regex queries, two
+directions per pair (shown as `a / b`).
 
-| Repository, switch | Files changed | Checkout | Index caught up | Answers flagged stale | p50 / p95 / max during the switch | Steady p50 / p95 | Fresh+complete answers vs rg |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| OpenUnum (JS, 1.9k files), two commits | 1,529 | 0.07 / 0.19 s | 0.9 / 1.3 s | 0.9 / 1.2 s | 1.7 / 2.8 / 6.1 ms; 2.0 / 3.7 / 9.0 ms | 0.9 / 1.2 ms | 27,669 checked, **0 wrong** |
-| Linux (81.8k files), v6.6 <-> v6.6-rc7 | 151 | 0.1 / 0.1 s | 18.4 / 18.5 s | **none** | 11 / 33 / 70 ms; 12 / 35 / 79 ms | 9.4 / 29 ms | 3,818 checked, **0 wrong** |
-| Linux, v6.6 <-> v6.5 | 14,856 | 2.8 / 1.3 s | 31.3 / 20.6 s | 31.1 / 21.3 s | 22 / 58 / 76 ms; 14 / 36 / 79 ms | 18 / 47 ms | 1,365 checked, **0 wrong** |
-| Linux, v6.6 <-> v6.1 | 44,686 | 3.0 / 2.9 s | 21.5 / 23.9 s | 21.4 / 23.6 s | 12 / 35 / 97 ms; 12 / 34 / 57 ms | 9.8 / 30 ms | 1,464 checked, **0 wrong** |
+| Repository, switch | Version | Files changed | Checkout | Index caught up | Answers flagged stale | p50 / p95 / max during the switch | Steady p50 / p95 | Fresh+complete answers vs rg |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| OpenUnum (JS, 1.9k files), two commits | 0.1.6 | 1,529 | 0.1 / 0.2 s | 0.9 / 1.4 s | 0.8 / 1.4 s | 2 / 2 / 5 ms; 2 / 3 / 12 ms | 0.9 / 1 ms | 27,258 checked, **0 wrong** |
+| | **0.1.7** | 1,529 | 0.1 / 0.3 s | 0.8 / 1.1 s | 0.7 / 1.1 s | 2 / 2 / 5 ms; 2 / 3 / 7 ms | 0.9 / 1 ms | 28,011 checked, **0 wrong** |
+| Linux (81.8k files), v6.6 <-> v6.6-rc7 | 0.1.6 | 151 | 0.3 / 0.1 s | 35.1 / 35.4 s | **none** | 20 / 56 / 107 ms; 20 / 56 / 103 ms | 19 / 53 ms | 3,482 checked, **0 wrong** |
+| | **0.1.7** | 151 | 0.2 / 0.2 s | **2.0 / 2.1 s** | **none** | 20 / 63 / 86 ms; 21 / 60 / 74 ms | 19 / 52 ms | 888 checked, **0 wrong** |
+| Linux, v6.6 <-> v6.5 | 0.1.6 | 14,856 | 2.9 / 1.4 s | 36.5 / 33.7 s | 36.3 / 34.5 s | 24 / 62 / 143 ms; 24 / 63 / 115 ms | 19 / 56 ms | 1,065 checked, **0 wrong** |
+| | **0.1.7** | 14,856 | 2.9 / 3.2 s | **6.7 / 7.0 s** | **6.6 / 6.5 s** | 26 / 66 / 106 ms; 27 / 71 / 126 ms | 21 / 56 ms | 760 checked, **0 wrong** |
+| Linux, v6.6 <-> v6.1 | 0.1.6 | 44,686 | 3.0 / 2.6 s | 20.2 / 22.6 s | 19.9 / 22.4 s | 12 / 33 / 69 ms; 12 / 35 / 55 ms | 9.0 / 23 ms | 1,507 checked, **0 wrong** |
+| | **0.1.7** | 44,686 | 3.0 / 2.9 s | **7.5 / 6.4 s** | **7.3 / 6.2 s** | 13 / 39 / 74 ms; 13 / 42 / 75 ms | 10 / 30 ms | 1,483 checked, **0 wrong** |
 
 - **Queries.** OpenUnum: the first 12 of [`queries-agent.json`](bench/queries-agent.json). Linux:
   12 kernel regexes ([`queries-kernel.json`](bench/queries-kernel.json)) that match 686 to
   17,169 files each; every answer returns all matching paths, so most of those milliseconds are
   result size, not lookup.
-- **"Index caught up"** is checkout start until the rebuilt index is live. A repository is one
-  unit and a unit is rebuilt as a whole, so on the kernel any change costs a background rebuild
-  of 81k files (13 to 30 s here; the initial build took the same). Queries keep being answered
-  during it at about steady latency.
+- **"Index caught up"** is checkout start until the rebuilt index is live. Since v0.1.7 a rebuild
+  reads only the files whose size or change time moved and merges everything else from the old
+  shards (see [How it works](#how-it-works)); before, a unit was rebuilt as a whole, so on the
+  kernel any change cost a re-read of 81k files (20 to 36 s here). The remaining window is
+  mostly the checkout itself (3 s for the big switches) plus 3 to 4 s of rebuild. Initial index
+  of the kernel: 13 to 33 s with v0.1.6, 3 to 6 s with v0.1.7 (reading on 4 threads, sort-free
+  trigram extraction).
 - **"Flagged stale"**: up to 2,000 changed files, the daemon verifies the changed files directly
   and answers stay `fresh` and exact (the 151-file kernel switch: no stale answers at all, 0
   wrong). Past that, or when directories appear or vanish, answers say `fresh: false` /
   `complete: false` until the rebuild lands, and a client should fall back to its own scan. Those
-  answers are not counted as wrong; they say so.
+  answers are not counted as wrong; they say so. The 2,000-file limit stays: each pending file is
+  read by every query, which on the kernel already costs about 5 ms of p50 at 1,990 pending
+  files (10.5 -> 15.7 ms), so tens of thousands would cost every query far more than the
+  rebuild now takes.
 - **Correctness.** Before each run all 12 queries returned exactly rg's files (rg with
   `unumsearch excludes` as `--ignore-file`, `--hidden`, 1 MB cap). After each checkout every
-  answer marked fresh + complete was compared with rg: 0 of 34,316 differed. Answers that
-  started while `git checkout` was still writing are not checked (the tree had no single state).
-- **Memory.** Daemon peak RSS (VmHWM, with `MALLOC_ARENA_MAX=2`): 41 MB on OpenUnum, 235 MB
-  on the kernel, which includes resident pages of the 259 MB memory-mapped index.
-- **Noise.** The v6.5 run landed on a busier stretch (its steady p50 was 18 ms against 9 to 10 ms
-  in the other two runs). Shallow clones (`--depth 1` per tag); one client; one run per pair.
+  answer marked fresh + complete was compared with rg: 0 of 64,454 differed (both versions).
+  Answers that started while `git checkout` was still writing are not checked (the tree had no
+  single state). Fewer answers were checked with v0.1.7 on the kernel because the window it
+  queries through is shorter.
+- **Memory.** Daemon peak RSS (VmHWM, with `MALLOC_ARENA_MAX=2`): about 40 MB on OpenUnum both
+  versions; on the kernel 231 to 233 MB (v0.1.6) and 200 to 227 MB (v0.1.7), which includes
+  resident pages of the mmapped index (259 / 252 MB). Peak anonymous memory while building the
+  kernel index: 59 MB (v0.1.6), 72 MB (v0.1.7, four reading threads within the 96 MB budget).
+- **Noise.** Runs were interleaved (v0.1.6 then v0.1.7, or the reverse) per pair; the rc7 and
+  v6.5 pairs landed on a busier stretch (steady p50 19 to 21 ms against 9 to 10 ms) for both
+  versions. Shallow clones (`--depth 1` per tag); one client; one run per pair per version.
+  Steady-state query latency, A/B with two private daemons answering alternately: kernel
+  (12 queries x 11 runs) 223 ms total for v0.1.7 against 226 ms for v0.1.6; the author's tree
+  (20 agent queries x 5 runs, twice, order swapped) 3,727 ms against 3,823 ms; same files in
+  every answer.
 
 ```bash
 git clone --depth 1 --branch v6.6 https://github.com/torvalds/linux.git /tmp/linux
@@ -450,9 +481,13 @@ of 12 queries, ugrep for 11 (it has no file-size cap).
 
 ## Limitations
 
-- A unit is rebuilt as a whole when it changes (changed files are searchable immediately
-  through the overlay). Very large single units rebuild more slowly; split them with
-  `split_roots`.
+- A rebuild lists its whole unit and rewrites every shard that held a changed file (shards are
+  about 64 MB), so a rebuild of a very large unit costs a listing and a merge even for one
+  edit (changed files are searchable immediately through the overlay meanwhile). Split such
+  units with `split_roots`.
+- During a change too large for the overlay (over 2,000 files, or directories appearing and
+  vanishing, as in a big `git checkout`), answers say `fresh: false` until the rebuild lands:
+  on the kernel tree, the checkout plus a few seconds.
 - Matching is line-oriented like ripgrep without `-U`; multi-line patterns are not supported.
 - Case-insensitive matching of non-ASCII text works but gets less help from the index (non-ASCII
   trigrams are not case-folded), so it reads more candidate files.
