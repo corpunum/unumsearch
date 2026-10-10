@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.1.7 (2026-10-10) - Incremental Rebuilds
+
+A large `git checkout` on a big repository no longer leaves answers stale for 20 to 36 s. No API
+or index-format change; steady-state query latency unchanged (A/B below).
+
+- **Incremental rebuilds.** A rebuild lists the unit, compares it with the indexed documents
+  (path, size, change time) and reads only new and changed files and files an event reported;
+  every other document keeps its postings. The shards that held dropped or changed documents
+  are rewritten by `shard::merge`, which decodes and renumbers posting lists without reading
+  any file, into shards of about 64 MB; untouched shards are kept as they are (one edit
+  rewrites one shard). `index --force` still rebuilds from scratch.
+- **Parallel, faster indexing.** Files are read and indexed on up to 8 threads, one per 24 MiB
+  of `max_memory_mb` (4 at the default 96), each thread's share of the budget flushing small
+  pieces that the merge combines. Trigram extraction deduplicates through a reusable
+  open-addressing table instead of sorting every position (2.7x faster extraction), and the
+  shard builder hashes trigrams with a multiplicative hasher. Initial index of the Linux tree:
+  13-33 s -> 3-6 s.
+- **Change time.** The size/mtime fingerprint and the per-document stamp now use the later of
+  mtime and ctime (Unix), so a rewrite that restores an old mtime (`cp -p`, `touch -d`, archive
+  extraction) is still seen. Files stamped within 2 s of being read ("racily clean", as git calls
+  it) are read again by the next rebuild. The first rebuild after upgrading reads files whose
+  ctime is later than their mtime once.
+- **Watcher.** Once a unit awaits a full re-listing and its pending set is full (2,000 files),
+  further events for it only move its quiet period instead of being classified one by one; on
+  a 44k-file checkout that classification (a directory listing per new file) delayed the
+  rebuild by 4 to 8 s.
+- **Fix: a reported change could be dropped.** When the unit's listing was unchanged (a rewrite
+  that kept size and mtime: restored mtime, coarse clock, Windows without ctime), the rebuild
+  returned early and cleared the pending change, so the old content stayed indexed. A pending
+  change now always gets its file read again. (Predates this release; found by the new tests
+  on Windows CI.)
+- Branch switch on Linux (81.8k files), v0.1.6 -> v0.1.7, interleaved on one machine: v6.6 <->
+  v6.1 (44,686 files changed) index caught up 20.2/22.6 s -> 7.5/6.4 s, answers flagged stale
+  19.9/22.4 s -> 7.3/6.2 s; v6.6 <-> v6.5 (14,856) 36/34 s -> 7/7 s; v6.6 <-> v6.6-rc7 (151,
+  never stale) 35 s -> 2 s. 0 wrong fresh+complete answers in 64,454 checked against rg.
+  Steady-state A/B: kernel 223 vs 226 ms total, the author's 247k-file tree 3,727 vs 3,823 ms.
+- Tests: a branch-switch differential test against rg (thousands of files rewritten, deleted
+  and added, directories appearing and vanishing, ignore-file edits, same-size rewrites with the
+  old mtime put back; the incremental index must list exactly what a from-scratch build lists,
+  with a bounded shard count), `tests/incremental.rs`, a shard-merge unit test and an
+  extractor equivalence test.
+
 ## v0.1.6 (2026-10-09) - Fresh During Rebuilds
 
 Fixes a freshness bug first seen on macOS CI ([#6](https://github.com/corpunum/unumsearch/issues/6)).
