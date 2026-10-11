@@ -25,6 +25,7 @@ ignore = "0.4"
 globset = "0.4"
 regex = "1"
 regex-syntax = "0.8"
+memchr = "2"
 memmap2 = "0.9"
 notify = "8"
 serde = { version = "1", features = ["derive"] }

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased - Faster verification
+
+Regex queries spend less CPU verifying candidate files. Answers are unchanged: the same files,
+lines, line numbers and order as v0.1.7 (checked with `bench/verify_compare.py`, 70 queries, over
+the indexed files of `~/main` and `~/unumsearch`).
+
+- **One search per file.** A candidate is searched once for the whole buffer, and each line
+  where a match starts is then tested on its own, as before. Matches that span a newline cannot
+  hide later lines.
+- **Literal prefilter.** A file that lacks a literal every match must contain is skipped before
+  the regex runs.
+- **Binary check.** The first 8 KB are read and checked for NUL before the rest of a file is
+  read. The rule itself is unchanged: a NUL anywhere in the file still makes it binary.
+- Patterns with `$` on files that contain `\r`, and the `\A`/`\z` assertions, keep the v0.1.7
+  per-line path.
+
 ## v0.1.7 (2026-10-10) - Incremental Rebuilds
 
 A large `git checkout` on a big repository no longer leaves answers stale for 20 to 36 s. No API

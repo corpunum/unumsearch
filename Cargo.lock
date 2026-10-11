@@ -570,6 +570,7 @@ dependencies = [
  "globset",
  "ignore",
  "lexopt",
+ "memchr",
  "memmap2",
  "notify",
  "regex",
