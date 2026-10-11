@@ -1,0 +1,389 @@
+[
+ {
+  "id": "lit-00",
+  "class": "literal",
+  "pattern": "unumsearch",
+  "literal": true
+ },
+ {
+  "id": "lit-01",
+  "class": "literal",
+  "pattern": "fn main",
+  "literal": true
+ },
+ {
+  "id": "lit-02",
+  "class": "literal",
+  "pattern": "TODO",
+  "literal": true
+ },
+ {
+  "id": "lit-03",
+  "class": "literal",
+  "pattern": "pub fn",
+  "literal": true
+ },
+ {
+  "id": "lit-04",
+  "class": "literal",
+  "pattern": "return ",
+  "literal": true
+ },
+ {
+  "id": "lit-05",
+  "class": "literal",
+  "pattern": "Result<",
+  "literal": true
+ },
+ {
+  "id": "lit-06",
+  "class": "literal",
+  "pattern": "self.",
+  "literal": true
+ },
+ {
+  "id": "lit-07",
+  "class": "literal",
+  "pattern": "::new(",
+  "literal": true
+ },
+ {
+  "id": "lit-08",
+  "class": "literal",
+  "pattern": "->",
+  "literal": true
+ },
+ {
+  "id": "lit-09",
+  "class": "literal",
+  "pattern": "config.toml",
+  "literal": true
+ },
+ {
+  "id": "lit-re-01",
+  "class": "literal",
+  "pattern": "verify_threads"
+ },
+ {
+  "id": "lit-re-02",
+  "class": "literal",
+  "pattern": "memchr0"
+ },
+ {
+  "id": "lit-re-03",
+  "class": "literal",
+  "pattern": "BIG_VERIFY"
+ },
+ {
+  "id": "re-s-01",
+  "class": "regex",
+  "pattern": "fn\\s+main"
+ },
+ {
+  "id": "re-s-02",
+  "class": "regex",
+  "pattern": "pub\\s+fn\\s+\\w+"
+ },
+ {
+  "id": "re-s-03",
+  "class": "regex",
+  "pattern": "impl\\s+\\w+\\s+for"
+ },
+ {
+  "id": "re-s-04",
+  "class": "regex",
+  "pattern": "let\\s+mut\\s+\\w+"
+ },
+ {
+  "id": "re-s-05",
+  "class": "regex",
+  "pattern": "use\\s+std::\\w+"
+ },
+ {
+  "id": "re-s-06",
+  "class": "regex",
+  "pattern": "\\bfn\\s+verify\\b"
+ },
+ {
+  "id": "re-s-07",
+  "class": "regex",
+  "pattern": "struct\\s+\\w+\\s*\\{"
+ },
+ {
+  "id": "re-s-08",
+  "class": "regex",
+  "pattern": "\\s{3,}\\w"
+ },
+ {
+  "id": "re-s-09",
+  "class": "regex",
+  "pattern": "fn\\s+\\w+\\s*\\([^)]*\\)"
+ },
+ {
+  "id": "alt-01",
+  "class": "regex",
+  "pattern": "TODO|FIXME|XXX"
+ },
+ {
+  "id": "alt-02",
+  "class": "regex",
+  "pattern": "error|warn|panic"
+ },
+ {
+  "id": "alt-03",
+  "class": "regex",
+  "pattern": "(fn|struct|enum)\\s+\\w+"
+ },
+ {
+  "id": "alt-04",
+  "class": "regex",
+  "pattern": "true|false|null"
+ },
+ {
+  "id": "alt-05",
+  "class": "regex",
+  "pattern": "(?:Ok|Err)\\("
+ },
+ {
+  "id": "ci-01",
+  "class": "literal",
+  "pattern": "todo",
+  "ci": true,
+  "literal": true
+ },
+ {
+  "id": "ci-02",
+  "class": "literal",
+  "pattern": "FN MAIN",
+  "ci": true,
+  "literal": true
+ },
+ {
+  "id": "ci-03",
+  "class": "regex",
+  "pattern": "(?i)fixme"
+ },
+ {
+  "id": "ci-04",
+  "class": "regex",
+  "pattern": "verify\\s+",
+  "ci": true
+ },
+ {
+  "id": "ci-05",
+  "class": "regex",
+  "pattern": "\\bstruct\\b",
+  "ci": true
+ },
+ {
+  "id": "ci-06",
+  "class": "regex",
+  "pattern": "error\\s*:",
+  "ci": true
+ },
+ {
+  "id": "uni-01",
+  "class": "literal",
+  "pattern": "é",
+  "literal": true
+ },
+ {
+  "id": "uni-02",
+  "class": "regex",
+  "pattern": "é+"
+ },
+ {
+  "id": "uni-03",
+  "class": "literal",
+  "pattern": "Ελληνικά",
+  "literal": true
+ },
+ {
+  "id": "uni-04",
+  "class": "regex",
+  "pattern": "\\p{Greek}+"
+ },
+ {
+  "id": "uni-05",
+  "class": "regex",
+  "pattern": "[α-ω]{3,}"
+ },
+ {
+  "id": "uni-06",
+  "class": "literal",
+  "pattern": "→",
+  "literal": true
+ },
+ {
+  "id": "uni-07",
+  "class": "regex",
+  "pattern": "\\p{Han}+"
+ },
+ {
+  "id": "uni-08",
+  "class": "regex",
+  "pattern": "\\s\\p{Lu}\\w*",
+  "ci": false
+ },
+ {
+  "id": "ml-01",
+  "class": "regex",
+  "pattern": "fn\\s*\\(\\s*\\w+\\s*\\)\\s*->"
+ },
+ {
+  "id": "ml-02",
+  "class": "regex",
+  "pattern": "\\w+\\s*\\n\\s*\\}"
+ },
+ {
+  "id": "ml-03",
+  "class": "regex",
+  "pattern": "a\\nb"
+ },
+ {
+  "id": "ml-04",
+  "class": "regex",
+  "pattern": "\\{\\s*\\n"
+ },
+ {
+  "id": "ml-05",
+  "class": "regex",
+  "pattern": "\\)\\s+\\{\\s*$"
+ },
+ {
+  "id": "ml-06",
+  "class": "regex",
+  "pattern": "[^a-z]\\n\\n"
+ },
+ {
+  "id": "anc-01",
+  "class": "regex",
+  "pattern": "^\\s*//"
+ },
+ {
+  "id": "anc-02",
+  "class": "regex",
+  "pattern": "^use "
+ },
+ {
+  "id": "anc-03",
+  "class": "regex",
+  "pattern": "^$"
+ },
+ {
+  "id": "anc-04",
+  "class": "regex",
+  "pattern": "^\\s*pub fn"
+ },
+ {
+  "id": "anc-05",
+  "class": "regex",
+  "pattern": "\\}$"
+ },
+ {
+  "id": "anc-06",
+  "class": "regex",
+  "pattern": "\\A\\s*fn"
+ },
+ {
+  "id": "anc-07",
+  "class": "regex",
+  "pattern": "\\bself\\b"
+ },
+ {
+  "id": "anc-08",
+  "class": "regex",
+  "pattern": "\\Bfn\\B"
+ },
+ {
+  "id": "anc-09",
+  "class": "regex",
+  "pattern": "\\r"
+ },
+ {
+  "id": "anc-10",
+  "class": "regex",
+  "pattern": "\\S+$"
+ },
+ {
+  "id": "anc-11",
+  "class": "regex",
+  "pattern": "^\\s*$"
+ },
+ {
+  "id": "anc-12",
+  "class": "regex",
+  "pattern": "x*"
+ },
+ {
+  "id": "files-01",
+  "class": "regex",
+  "pattern": "fn\\s+main",
+  "files_only": true
+ },
+ {
+  "id": "files-02",
+  "class": "literal",
+  "pattern": "unumsearch",
+  "literal": true,
+  "files_only": true
+ },
+ {
+  "id": "files-03",
+  "class": "regex",
+  "pattern": "^$",
+  "files_only": true
+ },
+ {
+  "id": "cap-01",
+  "class": "regex",
+  "pattern": "fn\\s+\\w+",
+  "max": 5
+ },
+ {
+  "id": "cap-02",
+  "class": "regex",
+  "pattern": "^$",
+  "max": 7
+ },
+ {
+  "id": "cap-03",
+  "class": "literal",
+  "pattern": "return",
+  "literal": true,
+  "max": 1
+ },
+ {
+  "id": "meta-01",
+  "class": "literal",
+  "pattern": "a.b*",
+  "literal": true
+ },
+ {
+  "id": "meta-02",
+  "class": "regex",
+  "pattern": "[0-9]+\\.[0-9]+"
+ },
+ {
+  "id": "meta-03",
+  "class": "regex",
+  "pattern": "\\\\n"
+ },
+ {
+  "id": "root-01",
+  "class": "regex",
+  "pattern": "\\bdef\\s+\\w+",
+  "roots": [
+   "unumsearch",
+   "main"
+  ]
+ },
+ {
+  "id": "root-02",
+  "class": "regex",
+  "pattern": "\\bfn\\s+main",
+  "roots": [
+   "unumsearch"
+  ]
+ }
+]

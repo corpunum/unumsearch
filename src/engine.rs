@@ -474,24 +474,6 @@ enum Hit {
     Lines(Vec<Match>),
 }
 
-/// Read `p` into `buf` if it is at most `cap` bytes (the corpus size cap: a
-/// file that grew past it is skipped, as a walk would skip it). The buffer is
-/// reused across files.
-fn read_capped(p: &Path, cap: u64, buf: &mut Vec<u8>) -> bool {
-    use std::io::Read;
-    buf.clear();
-    let Ok(f) = File::open(p) else { return false };
-    let hint = f.metadata().map(|m| m.len()).unwrap_or(0);
-    if hint > cap {
-        return false;
-    }
-    buf.reserve(hint as usize + 1);
-    match f.take(cap + 1).read_to_end(buf) {
-        Ok(_) => buf.len() as u64 <= cap,
-        Err(_) => false,
-    }
-}
-
 /// Does any line of `buf` match (the same answer as testing every line, as
 /// the per-line loop does)? The whole-buffer search jumps straight to a
 /// candidate line; only that line is then confirmed.
@@ -1703,6 +1685,7 @@ impl Engine {
             .multi_line(true)
             .build()
             .map_err(|e| e.to_string())?;
+        let pf = crate::verify::Prefilter::new(&pattern, o.case_insensitive)?;
         let ov = Self::overrides(&root, &o.globs)?;
 
         // Snapshot what the query needs under the lock (shards are shared
@@ -1855,7 +1838,7 @@ impl Engine {
             }
             (files, vec![], truncated)
         } else {
-            self.verify(&paths, &cands, &re, o)
+            self.verify(&paths, &cands, &re, &pf, o)
         };
         Ok(SearchResult {
             backend,
@@ -1923,6 +1906,7 @@ impl Engine {
         roots: &[&Path],
         cands: &[Cand],
         re: &regex::bytes::Regex,
+        pf: &crate::verify::Prefilter,
         o: &SearchOpts,
     ) -> (Vec<String>, Vec<Match>, bool) {
         let n = cands.len();
@@ -1952,7 +1936,7 @@ impl Engine {
                     .skip(start)
                 {
                     let p = roots[c.unit as usize].join(&*c.rel);
-                    if !read_capped(&p, cap, &mut buf) || memchr0(&buf) {
+                    if !crate::verify::read_text(&p, cap, &mut buf) || !pf.may_match(&buf) {
                         continue;
                     }
                     if o.files_only {
@@ -1964,25 +1948,29 @@ impl Engine {
                         }
                         continue;
                     }
-                    if !re.is_match(&buf) {
-                        continue;
-                    }
                     let ps = path_str(&p);
                     let mut ms = Vec::new();
                     let mut b = 0usize;
-                    for (ln, line) in buf.split(|b| *b == b'\n').enumerate() {
-                        let line = line.strip_suffix(b"\r").unwrap_or(line);
-                        if re.is_match(line) {
-                            let text =
-                                String::from_utf8_lossy(&line[..line.len().min(2000)]).into_owned();
-                            b += ps.len() + text.len() + ITEM_OVERHEAD;
-                            ms.push(Match {
-                                path: ps.clone(),
-                                line: ln as u64 + 1,
-                                text,
-                            });
-                            // More than the caps can never be returned.
-                            if ms.len() > o.max_matches || b > o.max_result_bytes {
+                    // Keep one line; false once the caps say no more can be
+                    // returned (the same stop point as the per-line loop).
+                    let mut keep = |ln: usize, line: &[u8]| -> bool {
+                        let text =
+                            String::from_utf8_lossy(&line[..line.len().min(2000)]).into_owned();
+                        b += ps.len() + text.len() + ITEM_OVERHEAD;
+                        ms.push(Match {
+                            path: ps.clone(),
+                            line: ln as u64 + 1,
+                            text,
+                        });
+                        ms.len() <= o.max_matches && b <= o.max_result_bytes
+                    };
+                    if pf.line_fast(&buf) {
+                        crate::verify::matching_lines(re, &buf, keep);
+                    } else if re.is_match(&buf) {
+                        // v0.1.7 path: whole-buffer gate, then every line.
+                        for (ln, line) in buf.split(|b| *b == b'\n').enumerate() {
+                            let line = line.strip_suffix(b"\r").unwrap_or(line);
+                            if re.is_match(line) && !keep(ln, line) {
                                 break;
                             }
                         }

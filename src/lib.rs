@@ -14,6 +14,7 @@ pub mod config;
 pub mod engine;
 pub mod shard;
 pub mod trigram;
+pub mod verify;
 pub mod walk;
 pub mod watch;
 
