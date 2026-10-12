@@ -361,7 +361,9 @@ fn main() {
             o.root = path
                 .map(|p| expand_tilde(&p))
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-            let e = Engine::open(cfg, false).unwrap_or_else(|e| die(e));
+            // `files --frecency` records successful fuzzy results; request writer access
+            // only for that opt-in path. If another process owns the index, it stays read-only.
+            let e = Engine::open(cfg, o.frecency).unwrap_or_else(|e| die(e));
             match e.files(&o) {
                 Ok(r) => print(&json!({"ok": true, "result": r})),
                 Err(err) => {

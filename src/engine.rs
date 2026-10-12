@@ -2102,7 +2102,7 @@ impl Engine {
             if !Self::glob_ok(&ov, abs) {
                 return false;
             }
-            if let Some(query) = fuzzy_query.as_deref().filter(|q| !q.is_empty()) {
+            if let Some(query) = fuzzy_query.filter(|q| !q.is_empty()) {
                 let path = walk::rel_string(&root, abs).unwrap_or_default();
                 if fuzzy_score(&path, query).is_none() {
                     return false;
@@ -2123,12 +2123,12 @@ impl Engine {
         let mut files = Vec::new();
         let mut truncated = false;
         let mut bytes = 0usize;
-        // Fuzzy results are globally ranked before applying the count cap.
+        // Fuzzy candidates are ranked before applying either result cap.
         let fuzzy_mode = fuzzy_query.is_some_and(|q| !q.is_empty());
         // Room for one more path (both caps), or the answer is truncated.
         let mut room = |p: &str| {
             bytes += p.len() + ITEM_OVERHEAD;
-            bytes <= o.max_result_bytes
+            fuzzy_mode || bytes <= o.max_result_bytes
         };
         let excluded = {
             let g = self.inner.read().unwrap();
@@ -2215,37 +2215,22 @@ impl Engine {
         }
         files.sort();
         files.dedup();
-        if let Some(query) = fuzzy_query.as_deref().filter(|q| !q.is_empty()) {
+        if let Some(query) = fuzzy_query.filter(|q| !q.is_empty()) {
             files.retain(|path| {
                 let rel = walk::rel_string(&root, Path::new(path)).unwrap_or_default();
                 fuzzy_score(&rel, query).is_some()
             });
             let _frecency_guard = self.frecency_lock.lock().unwrap();
             let store_path = self.dir.join("frecency.json");
-            let mut store: FrecencyStore = std::fs::read(&store_path)
-                .ok()
-                .and_then(|data| serde_json::from_slice(&data).ok())
-                .unwrap_or_default();
+            let mut store: FrecencyStore = if o.frecency {
+                std::fs::read(&store_path)
+                    .ok()
+                    .and_then(|data| serde_json::from_slice(&data).ok())
+                    .unwrap_or_default()
+            } else {
+                FrecencyStore::default()
+            };
             let now = now_ms();
-            // Persisted entry score is computed below.
-            if o.frecency && self.writer {
-                for path in &files {
-                    let entry = store.entries.entry(path.clone()).or_default();
-                    entry.uses = entry.uses.saturating_add(1);
-                    entry.last_used_ms = now;
-                }
-                if store.entries.len() > 10_000 {
-                    let mut ranked: Vec<_> = store.entries.into_iter().collect();
-                    ranked.sort_by_key(|(_, e)| std::cmp::Reverse(e.last_used_ms));
-                    store.entries = ranked.into_iter().take(10_000).collect();
-                }
-                if let Ok(data) = serde_json::to_vec(&store) {
-                    let tmp = self.dir.join("frecency.json.tmp");
-                    if std::fs::write(&tmp, data).is_ok() {
-                        let _ = std::fs::rename(tmp, store_path.clone());
-                    }
-                }
-            }
             files.sort_by(|a, b| {
                 let ar = walk::rel_string(&root, Path::new(a)).unwrap_or_default();
                 let br = walk::rel_string(&root, Path::new(b)).unwrap_or_default();
@@ -2260,6 +2245,34 @@ impl Engine {
             if files.len() > o.max_files {
                 files.truncate(o.max_files);
                 truncated = true;
+            }
+            let mut returned_bytes = 0usize;
+            files.retain(|path| {
+                returned_bytes += path.len() + ITEM_OVERHEAD;
+                if returned_bytes <= o.max_result_bytes {
+                    true
+                } else {
+                    truncated = true;
+                    false
+                }
+            });
+            if o.frecency && self.writer {
+                for path in &files {
+                    let entry = store.entries.entry(path.clone()).or_default();
+                    entry.uses = entry.uses.saturating_add(1);
+                    entry.last_used_ms = now;
+                }
+                if store.entries.len() > 10_000 {
+                    let mut ranked: Vec<_> = store.entries.into_iter().collect();
+                    ranked.sort_by_key(|(_, e)| std::cmp::Reverse(e.last_used_ms));
+                    store.entries = ranked.into_iter().take(10_000).collect();
+                }
+                if let Ok(data) = serde_json::to_vec(&store) {
+                    let tmp = self.dir.join("frecency.json.tmp");
+                    if std::fs::write(&tmp, data).is_ok() {
+                        let _ = std::fs::rename(tmp, store_path);
+                    }
+                }
             }
         }
         Ok(FilesResult {

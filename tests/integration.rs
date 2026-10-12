@@ -197,9 +197,10 @@ fn corpus_rules_and_query_semantics() {
         })
         .unwrap();
     assert_eq!(rels(&root, &persisted.files), vec!["unicode.txt"]);
-    assert!(e.dir.join("frecency.json").exists());
+    assert!(e.index_dir().join("frecency.json").exists());
     let stored: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(e.dir.join("frecency.json")).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(e.index_dir().join("frecency.json")).unwrap())
+            .unwrap();
     assert!(stored["entries"]
         .as_object()
         .unwrap()
