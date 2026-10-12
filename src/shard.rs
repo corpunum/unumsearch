@@ -395,6 +395,8 @@ pub struct MergeInput<'a> {
 /// buffered `read`s rather than the mapping: a merge streams every posting
 /// list once, and reading it through the map would leave the whole shard
 /// resident in this process (and counted in its RSS).
+type MergeChunk = (Vec<u8>, Vec<u8>, usize);
+
 struct Cursor {
     table: std::io::BufReader<File>,
     post: std::io::BufReader<File>,
@@ -519,7 +521,6 @@ fn merge_with_workers(
     path: &Path,
     workers: usize,
 ) -> std::io::Result<usize> {
-    use std::io::{Seek, SeekFrom};
     if crate::engine::FAIL_SHARD_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(std::io::Error::other("simulated disk write failure"));
     }
@@ -568,7 +569,7 @@ fn merge_with_workers(
     // Each worker owns independent cursors, and gets a disjoint numeric
     // trigram interval. Results are joined in interval order, making both
     // table order and posting bytes independent of scheduling.
-    let workers = workers.max(1).min(8);
+    let workers = workers.clamp(1, 8);
     let ranges: Vec<(u64, u64)> = (0..workers)
         .map(|i| {
             (
@@ -577,69 +578,67 @@ fn merge_with_workers(
             )
         })
         .collect();
-    let chunks = std::thread::scope(|scope| -> std::io::Result<Vec<(Vec<u8>, Vec<u8>, usize)>> {
+    let chunks = std::thread::scope(|scope| -> std::io::Result<Vec<MergeChunk>> {
         let mut handles = Vec::with_capacity(workers);
         for &(lo, hi) in &ranges {
             let remap = &remap;
-            handles.push(
-                scope.spawn(move || -> std::io::Result<(Vec<u8>, Vec<u8>, usize)> {
-                    let mut cursors = Vec::with_capacity(inputs.len());
-                    for inp in inputs {
-                        cursors.push(Cursor::open(inp.shard)?);
+            handles.push(scope.spawn(move || -> std::io::Result<MergeChunk> {
+                let mut cursors = Vec::with_capacity(inputs.len());
+                for inp in inputs {
+                    cursors.push(Cursor::open(inp.shard)?);
+                }
+                for c in &mut cursors {
+                    while c.cur.is_some_and(|(t, _)| (t as u64) < lo) {
+                        c.skip()?;
                     }
-                    for c in &mut cursors {
-                        while c.cur.is_some_and(|(t, _)| (t as u64) < lo) {
-                            c.skip()?;
+                }
+                let (mut table, mut postings) = (Vec::new(), Vec::new());
+                let (mut raw, mut ids, mut merged, mut enc) =
+                    (Vec::new(), Vec::new(), Vec::<(u32, u8)>::new(), Vec::new());
+                let mut count = 0usize;
+                while let Some(t) = cursors
+                    .iter()
+                    .filter_map(|c| c.cur.map(|x| x.0))
+                    .filter(|t| (*t as u64) < hi)
+                    .min()
+                {
+                    merged.clear();
+                    let mut sources = 0;
+                    for (k, c) in cursors.iter_mut().enumerate() {
+                        if c.cur.map(|x| x.0) != Some(t) {
+                            continue;
                         }
-                    }
-                    let (mut table, mut postings) = (Vec::new(), Vec::new());
-                    let (mut raw, mut ids, mut merged, mut enc) =
-                        (Vec::new(), Vec::new(), Vec::<(u32, u8)>::new(), Vec::new());
-                    let mut count = 0usize;
-                    while let Some(t) = cursors
-                        .iter()
-                        .filter_map(|c| c.cur.map(|x| x.0))
-                        .filter(|t| (*t as u64) < hi)
-                        .min()
-                    {
-                        merged.clear();
-                        let mut sources = 0;
-                        for (k, c) in cursors.iter_mut().enumerate() {
-                            if c.cur.map(|x| x.0) != Some(t) {
-                                continue;
-                            }
-                            c.take(&mut raw)?;
-                            decode_masks(&raw, &mut ids);
-                            let before = merged.len();
-                            for &(id, m) in &ids {
-                                if let Some(&nid) = remap[k].get(id as usize) {
-                                    if nid != u32::MAX {
-                                        merged.push((nid, m));
-                                    }
+                        c.take(&mut raw)?;
+                        decode_masks(&raw, &mut ids);
+                        let before = merged.len();
+                        for &(id, m) in &ids {
+                            if let Some(&nid) = remap[k].get(id as usize) {
+                                if nid != u32::MAX {
+                                    merged.push((nid, m));
                                 }
                             }
-                            if merged.len() > before {
-                                sources += 1;
-                            }
                         }
-                        if sources > 1 {
-                            merged.sort_unstable_by_key(|x| x.0);
+                        if merged.len() > before {
+                            sources += 1;
                         }
-                        enc.clear();
-                        let mut last: i64 = -1;
-                        for &(id, m) in &merged {
-                            put_varint(&mut enc, (id as i64 - last - 1) as u64);
-                            enc.push(m);
-                            last = id as i64;
-                        }
-                        table.extend_from_slice(&t.to_le_bytes());
-                        table.extend_from_slice(&(postings.len() as u32).to_le_bytes());
-                        postings.extend_from_slice(&enc);
-                        count += 1;
                     }
-                    Ok((table, postings, count))
-                }),
-            );
+                    if sources > 1 {
+                        merged.sort_unstable_by_key(|x| x.0);
+                    }
+                    enc.clear();
+                    let mut last: i64 = -1;
+                    for &(id, m) in &merged {
+                        put_varint(&mut enc, (id as i64 - last - 1) as u64);
+                        enc.push(m);
+                        last = id as i64;
+                    }
+                    table.extend_from_slice(&t.to_le_bytes());
+                    table.extend_from_slice(&(postings.len() as u32).to_le_bytes());
+                    postings.extend_from_slice(&enc);
+                    count += 1;
+                }
+                Ok((table, postings, count))
+            }));
         }
         let mut out = Vec::with_capacity(workers);
         for handle in handles {
@@ -668,7 +667,7 @@ fn merge_with_workers(
         w.write_all(&docbuf)?;
         let mut base = 0u64;
         for (table, postings, _) in &chunks {
-            for entry in table.chunks_exact(8) {
+            for entry in table.as_chunks::<8>().0 {
                 w.write_all(&entry[..4])?;
                 let off = u32::from_le_bytes(entry[4..8].try_into().unwrap()) as u64 + base;
                 w.write_all(&(off as u32).to_le_bytes())?;
