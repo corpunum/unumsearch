@@ -38,7 +38,7 @@ your own code with `python3 bench/race.py --root .` (see [See it yourself](#see-
 - **Content search**: regex (Rust/ripgrep syntax) or literal, case-sensitive or not, with
   ripgrep-style globs (`-g '*.rs' -g '!tests/**'`). Results are verified line by line against the
   files on disk; the index only narrows which files are read.
-- **Filename search**: globs and/or a regex on the relative path or basename.
+- **Filename search**: globs and/or a regex, or nucleo-ranked fuzzy matching on relative paths. Optional persistent frecency boosts paths returned by fuzzy queries; counts decay with a 30-day half-life.
 - **ripgrep-compatible corpus**: the file set is defined with ripgrep's own walker (the `ignore`
   crate): `.gitignore`/`.ignore` respected, hidden files included, binary files (NUL byte) and
   files above a size cap skipped, plus configurable gitignore-syntax excludes. Equivalence with
@@ -198,13 +198,15 @@ JSON-RPC, the Agent Skills format and plain CLI. Exact, checked configuration fo
 The test suite runs in CI on Linux x86_64 and arm64, macOS arm64 and Windows x86_64; the macOS
 x86_64 build is cross-compiled from arm64.
 
+This project is licensed under Apache-2.0. It includes the `nucleo-matcher` dependency, which is licensed under MPL-2.0; see the dependency's license for its terms.
+
 ## CLI
 
 | Command | Purpose |
 | --- | --- |
 | `index [--force]` | Build or update the index once (fails if a daemon holds the writer lock). |
 | `search PATTERN [PATH]` | Content search. `-F` literal, `-i` ignore case, `-g GLOB` (repeatable), `-l` files only, `-m N` max matches, `--candidates` unverified index candidates, `--no-scan`, `--text` for `path:line:text` output, `--all-roots` every configured root. |
-| `files [PATH]` | Filename search. `-g GLOB`, `--regex RE`, `--max N`. |
+| `files [PATH]` | Filename search. `-g GLOB`, `--regex RE`, `--max N`, `--fuzzy QUERY` (relative-path subsequence match), `--frecency` (persist returned paths; 30-day half-life, fuzzy mode). |
 | `status` | Units, file counts, index size, freshness, RSS. |
 | `excludes` | Effective exclude patterns, e.g. for `rg --ignore-file`. |
 | `watch` | Keep the index fresh (foreground, no API). |
@@ -237,8 +239,7 @@ message). The same methods (`search`, `files`, `lookup`, `status`, `reindex`) ar
 `search` parameters: `pattern` (required), `root`, `mode` (`literal` default, or `regex`),
 `ignore_case`/`ci`, `glob` (comma-separated or repeated), `files_only`, `candidates_only`,
 `max_matches`, `max_files`, `scan_fallback`, `all_roots` (or `root=*`: every configured root in
-one call; the answer adds a per-root `roots` summary). `files`: `root`, `glob`, `regex`,
-`max_files`.
+one call; the answer adds a per-root `roots` summary). `files`: `root`, `glob`, `regex`, `fuzzy` (nucleo fuzzy query on relative paths), `frecency` (persistently records returned fuzzy results; 30-day half-life ranking), `max_files`.
 
 `lookup` answers "which files contain each of these patterns?" for many patterns in one call:
 `patterns` (JSON array, or newline-separated over `GET`), `root` or `all_roots`, `mode`

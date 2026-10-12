@@ -12,6 +12,10 @@ use crate::shard::{DocMeta, Shard, ShardBuilder};
 use crate::trigram;
 use crate::walk::{self, FileEntry};
 use ignore::overrides::{Override, OverrideBuilder};
+use nucleo_matcher::{
+    pattern::{CaseMatching, Normalization, Pattern},
+    Config as NucleoConfig, Matcher, Utf32Str,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
@@ -20,6 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+//
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -158,6 +163,7 @@ pub struct Engine {
     /// Whether the corpus walk of a unit reaches a sub-directory, keyed by
     /// (unit, sub) and valid for the unit fingerprint it was computed at.
     reach_cache: Mutex<HashMap<(String, String), (u64, bool)>>,
+    frecency_lock: Mutex<()>,
     /// Test hook: sleep this long inside every rebuild, after the listing
     /// and before the new shards are published (emulates a slow disk, e.g.
     /// `F_FULLFSYNC` on macOS, which makes the rebuild window long).
@@ -185,6 +191,30 @@ impl Drop for QuerySlot<'_> {
 /// Test hook: make shard writes fail (simulates a full or failing disk).
 #[doc(hidden)]
 pub static FAIL_SHARD_WRITES: AtomicBool = AtomicBool::new(false);
+
+fn fuzzy_score(candidate: &str, query: &str) -> Option<u32> {
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+    let mut buf = Vec::new();
+    pattern.score(Utf32Str::new(candidate, &mut buf), &mut matcher)
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct FrecencyStore {
+    entries: HashMap<String, FrecencyEntry>,
+}
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct FrecencyEntry {
+    last_used_ms: u64,
+    uses: u32,
+}
+
+impl FrecencyEntry {
+    fn score(&self, now: u64) -> f64 {
+        let age_days = now.saturating_sub(self.last_used_ms) as f64 / 86_400_000.0;
+        self.uses as f64 * 0.5f64.powf(age_days / 30.0)
+    }
+}
 
 fn path_str(p: &Path) -> String {
     p.to_string_lossy().into_owned()
@@ -296,6 +326,10 @@ pub struct FilesOpts {
     pub globs: Vec<String>,
     /// Regex tested against the path relative to root, and the basename.
     pub regex: Option<String>,
+    /// Optional fuzzy filename query; paths are matched by subsequence.
+    pub fuzzy: Option<String>,
+    /// Rank and persist recent selections for fuzzy queries.
+    pub frecency: bool,
     pub max_files: usize,
     pub scan_fallback: bool,
     /// Memory budget for the returned paths (see [`SearchOpts`]).
@@ -308,6 +342,8 @@ impl Default for FilesOpts {
             root: PathBuf::from("."),
             globs: vec![],
             regex: None,
+            fuzzy: None,
+            frecency: false,
             max_files: 5000,
             scan_fallback: true,
             max_result_bytes: DEFAULT_RESULT_BYTES,
@@ -577,6 +613,7 @@ impl Engine {
             running: (Mutex::new(0), std::sync::Condvar::new()),
             splits: OnceLock::new(),
             reach_cache: Mutex::new(HashMap::new()),
+            frecency_lock: Mutex::new(()),
         };
         e.reload_manifest(true);
         if e.writer {
@@ -2060,9 +2097,16 @@ impl Engine {
             Some(r) => Some(regex::Regex::new(r).map_err(|e| e.to_string())?),
             None => None,
         };
+        let fuzzy_query = o.fuzzy.as_deref();
         let keep = |abs: &Path| -> bool {
             if !Self::glob_ok(&ov, abs) {
                 return false;
+            }
+            if let Some(query) = fuzzy_query.as_deref().filter(|q| !q.is_empty()) {
+                let path = walk::rel_string(&root, abs).unwrap_or_default();
+                if fuzzy_score(&path, query).is_none() {
+                    return false;
+                }
             }
             match &re {
                 None => true,
@@ -2169,6 +2213,49 @@ impl Engine {
         }
         files.sort();
         files.dedup();
+        if let Some(query) = fuzzy_query.as_deref().filter(|q| !q.is_empty()) {
+            files.retain(|path| {
+                let rel = walk::rel_string(&root, Path::new(path)).unwrap_or_default();
+                fuzzy_score(&rel, query).is_some()
+            });
+            let _frecency_guard = self.frecency_lock.lock().unwrap();
+            let store_path = self.dir.join("frecency.json");
+            let mut store: FrecencyStore = std::fs::read(&store_path)
+                .ok()
+                .and_then(|data| serde_json::from_slice(&data).ok())
+                .unwrap_or_default();
+            let now = now_ms();
+            // Persisted entry score is computed below.
+            if o.frecency && self.writer {
+                for path in &files {
+                    let entry = store.entries.entry(path.clone()).or_default();
+                    entry.uses = entry.uses.saturating_add(1);
+                    entry.last_used_ms = now;
+                }
+                if store.entries.len() > 10_000 {
+                    let mut ranked: Vec<_> = store.entries.into_iter().collect();
+                    ranked.sort_by_key(|(_, e)| std::cmp::Reverse(e.last_used_ms));
+                    store.entries = ranked.into_iter().take(10_000).collect();
+                }
+                if let Ok(data) = serde_json::to_vec(&store) {
+                    let tmp = self.dir.join("frecency.json.tmp");
+                    if std::fs::write(&tmp, data).is_ok() {
+                        let _ = std::fs::rename(tmp, store_path.clone());
+                    }
+                }
+            }
+            files.sort_by(|a, b| {
+                let ar = walk::rel_string(&root, Path::new(a)).unwrap_or_default();
+                let br = walk::rel_string(&root, Path::new(b)).unwrap_or_default();
+                let sa = fuzzy_score(&ar, query).unwrap_or_default();
+                let sb = fuzzy_score(&br, query).unwrap_or_default();
+                let fa = store.entries.get(a).map(|e| e.score(now)).unwrap_or(0.0);
+                let fb = store.entries.get(b).map(|e| e.score(now)).unwrap_or(0.0);
+                sb.cmp(&sa)
+                    .then_with(|| fb.total_cmp(&fa))
+                    .then_with(|| a.cmp(b))
+            });
+        }
         Ok(FilesResult {
             backend,
             covered,

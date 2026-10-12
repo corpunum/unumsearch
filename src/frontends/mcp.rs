@@ -38,6 +38,8 @@ fn tools() -> Value {
                     "path": {"type": "string"},
                     "glob": {"type": "array", "items": {"type": "string"}},
                     "regex": {"type": "string"},
+                    "fuzzy": {"type": "string", "description": "Case-insensitive fuzzy subsequence query on relative paths."},
+                    "frecency": {"type": "boolean", "description": "Rank fuzzy results using persistent local access counts."},
                     "max_files": {"type": "integer", "description": "Default 500."}
                 }
             },

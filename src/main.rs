@@ -32,6 +32,8 @@ COMMANDS:
   files [PATH]                    list indexed files
       -g, --glob GLOB             glob filter (repeatable)
       --regex RE                  regex on relative path or basename
+      --fuzzy QUERY               fuzzy-match relative path and rank by match quality
+      --frecency                   record and boost paths returned by fuzzy search
       --max N                     cap (default 5000)
   status                          index status (JSON)
   excludes                        effective exclude patterns (for rg --ignore-file)
@@ -312,6 +314,8 @@ fn main() {
                 root: PathBuf::new(),
                 globs: vec![],
                 regex: None,
+                fuzzy: None,
+                frecency: false,
                 max_files: 5000,
                 scan_fallback: true,
                 max_result_bytes: cfg.max_result_bytes(),
@@ -325,6 +329,15 @@ fn main() {
                             .string()
                             .unwrap_or_else(|e| die(e)),
                     ),
+                    Long("fuzzy") => {
+                        o.fuzzy = Some(
+                            sp.value()
+                                .unwrap_or_else(|e| die(e))
+                                .string()
+                                .unwrap_or_else(|e| die(e)),
+                        );
+                    }
+                    Long("frecency") => o.frecency = true,
                     Long("regex") => {
                         o.regex = Some(
                             sp.value()

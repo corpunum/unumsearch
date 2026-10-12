@@ -78,6 +78,8 @@ pub fn files_opts(engine: &Engine, p: &Value) -> FilesOpts {
             .unwrap_or_else(|| default_root(engine)),
         globs: globs(p),
         regex: s(p, "regex").or_else(|| s(p, "name")),
+        fuzzy: s(p, "fuzzy"),
+        frecency: b(p, "frecency", false),
         max_files: n(p, "max_files", 5000),
         scan_fallback: b(p, "scan_fallback", true),
         max_result_bytes: engine.cfg.max_result_bytes(),
