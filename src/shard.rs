@@ -573,8 +573,10 @@ fn merge_with_workers(
     let ranges: Vec<(u64, u64)> = (0..workers)
         .map(|i| {
             (
-                (u32::MAX as u64 + 1) * i as u64 / workers as u64,
-                (u32::MAX as u64 + 1) * (i + 1) as u64 / workers as u64,
+                // Trigrams are packed as three bytes, so the keyspace is 24-bit.
+                // Partitioning all 32 bits would leave every valid key in worker 0.
+                (1u64 << 24) * i as u64 / workers as u64,
+                (1u64 << 24) * (i + 1) as u64 / workers as u64,
             )
         })
         .collect();
