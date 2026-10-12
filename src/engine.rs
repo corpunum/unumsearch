@@ -2123,6 +2123,8 @@ impl Engine {
         let mut files = Vec::new();
         let mut truncated = false;
         let mut bytes = 0usize;
+        // Fuzzy results are globally ranked before applying the count cap.
+        let fuzzy_mode = fuzzy_query.is_some_and(|q| !q.is_empty());
         // Room for one more path (both caps), or the answer is truncated.
         let mut room = |p: &str| {
             bytes += p.len() + ITEM_OVERHEAD;
@@ -2156,7 +2158,7 @@ impl Engine {
                         let abs = Path::new(u).join(rel);
                         if in_sub(&c.sub, rel) && self.overlay_file_ok(&abs) && keep(&abs) {
                             let ps = path_str(&abs);
-                            if files.len() >= o.max_files || !room(&ps) {
+                            if (!fuzzy_mode && files.len() >= o.max_files) || !room(&ps) {
                                 truncated = true;
                                 break 'outer;
                             }
@@ -2180,7 +2182,7 @@ impl Engine {
                             let abs = Path::new(u).join(d.rel);
                             if keep(&abs) {
                                 let ps = path_str(&abs);
-                                if files.len() >= o.max_files || !room(&ps) {
+                                if (!fuzzy_mode && files.len() >= o.max_files) || !room(&ps) {
                                     truncated = true;
                                     break 'outer;
                                 }
@@ -2196,7 +2198,7 @@ impl Engine {
                     let abs = root.join(&f.rel);
                     if keep(&abs) {
                         let ps = path_str(&abs);
-                        if files.len() >= o.max_files || !room(&ps) {
+                        if (!fuzzy_mode && files.len() >= o.max_files) || !room(&ps) {
                             truncated = true;
                             break;
                         }
@@ -2255,6 +2257,10 @@ impl Engine {
                     .then_with(|| fb.total_cmp(&fa))
                     .then_with(|| a.cmp(b))
             });
+            if files.len() > o.max_files {
+                files.truncate(o.max_files);
+                truncated = true;
+            }
         }
         Ok(FilesResult {
             backend,

@@ -580,6 +580,7 @@ fn merge_with_workers(
     let chunks = std::thread::scope(|scope| -> std::io::Result<Vec<(Vec<u8>, Vec<u8>, usize)>> {
         let mut handles = Vec::with_capacity(workers);
         for &(lo, hi) in &ranges {
+            let remap = &remap;
             handles.push(
                 scope.spawn(move || -> std::io::Result<(Vec<u8>, Vec<u8>, usize)> {
                     let mut cursors = Vec::with_capacity(inputs.len());
