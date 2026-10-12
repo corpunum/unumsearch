@@ -402,6 +402,7 @@ struct Cursor {
     post: std::io::BufReader<File>,
     ntri: usize,
     post_len: usize,
+    post_off: usize,
     /// Index of the table entry `cur` is, and the one after it.
     at: usize,
     cur: Option<(Tri, u32)>,
@@ -420,6 +421,7 @@ impl Cursor {
             post: std::io::BufReader::with_capacity(1 << 16, p),
             ntri: s.ntri,
             post_len: s.post_len,
+            post_off: s.post_off,
             at: 0,
             cur: None,
             next: None,
@@ -448,7 +450,8 @@ impl Cursor {
         // to the end of the postings section for the last entry.
         if self.cur.is_some() {
             let end = self.next.map_or(self.post_len as u32, |(_, o)| o);
-            self.post.seek(SeekFrom::Start(end as u64))?;
+            self.post
+                .seek(SeekFrom::Start(self.post_off as u64 + end as u64))?;
         }
         self.cur = self.next;
         self.next = self.read_entry()?;
