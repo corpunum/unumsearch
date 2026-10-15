@@ -395,11 +395,14 @@ pub struct MergeInput<'a> {
 /// buffered `read`s rather than the mapping: a merge streams every posting
 /// list once, and reading it through the map would leave the whole shard
 /// resident in this process (and counted in its RSS).
+type MergeChunk = (Vec<u8>, Vec<u8>, usize);
+
 struct Cursor {
     table: std::io::BufReader<File>,
     post: std::io::BufReader<File>,
     ntri: usize,
     post_len: usize,
+    post_off: usize,
     /// Index of the table entry `cur` is, and the one after it.
     at: usize,
     cur: Option<(Tri, u32)>,
@@ -418,6 +421,7 @@ impl Cursor {
             post: std::io::BufReader::with_capacity(1 << 16, p),
             ntri: s.ntri,
             post_len: s.post_len,
+            post_off: s.post_off,
             at: 0,
             cur: None,
             next: None,
@@ -440,6 +444,15 @@ impl Cursor {
 
     /// Advance past the current trigram without reading its postings.
     fn skip(&mut self) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+        // Keep the postings stream aligned when a worker seeks over an entire
+        // trigram range. The end offset belongs to the next table entry, or
+        // to the end of the postings section for the last entry.
+        if self.cur.is_some() {
+            let end = self.next.map_or(self.post_len as u32, |(_, o)| o);
+            self.post
+                .seek(SeekFrom::Start(self.post_off as u64 + end as u64))?;
+        }
         self.cur = self.next;
         self.next = self.read_entry()?;
         Ok(())
@@ -493,7 +506,24 @@ fn decode_masks(bytes: &[u8], out: &mut Vec<(u32, u8)>) {
 /// in more than one input is taken from the last of them. Returns the number
 /// of documents written.
 pub fn merge(inputs: &[MergeInput<'_>], path: &Path) -> std::io::Result<usize> {
-    use std::io::{Seek, SeekFrom};
+    merge_with_workers(
+        inputs,
+        path,
+        std::thread::available_parallelism().map_or(1, usize::from),
+    )
+}
+
+/// Test/reference entry point retaining the same single-threaded merge order.
+#[cfg(test)]
+fn merge_serial(inputs: &[MergeInput<'_>], path: &Path) -> std::io::Result<usize> {
+    merge_with_workers(inputs, path, 1)
+}
+
+fn merge_with_workers(
+    inputs: &[MergeInput<'_>],
+    path: &Path,
+    workers: usize,
+) -> std::io::Result<usize> {
     if crate::engine::FAIL_SHARD_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(std::io::Error::other("simulated disk write failure"));
     }
@@ -539,31 +569,97 @@ pub fn merge(inputs: &[MergeInput<'_>], path: &Path) -> std::io::Result<usize> {
     let ndocs = n as usize;
     drop(docs);
 
-    // Trigrams of the output: the union of the input tables (a trigram whose
-    // documents were all dropped keeps an empty posting list; harmless).
-    let mut cursors = Vec::with_capacity(inputs.len());
-    for inp in inputs {
-        cursors.push(Cursor::open(inp.shard)?);
-    }
-    // The union of the input tables, counted by a merge of their (sorted)
-    // trigram streams.
-    let ntri = {
-        let mut cs = Vec::with_capacity(inputs.len());
-        for inp in inputs {
-            cs.push(Cursor::open(inp.shard)?);
-        }
-        let mut n = 0usize;
-        while let Some(t) = cs.iter().filter_map(|c| c.cur.map(|x| x.0)).min() {
-            n += 1;
-            for c in cs.iter_mut() {
-                if c.cur.map(|x| x.0) == Some(t) {
-                    c.skip()?;
+    // Each worker owns independent cursors, and gets a disjoint numeric
+    // trigram interval. Results are joined in interval order, making both
+    // table order and posting bytes independent of scheduling.
+    let workers = workers.clamp(1, 8);
+    let ranges: Vec<(u64, u64)> = (0..workers)
+        .map(|i| {
+            (
+                // Trigrams are packed as three bytes, so the keyspace is 24-bit.
+                // Partitioning all 32 bits would leave every valid key in worker 0.
+                (1u64 << 24) * i as u64 / workers as u64,
+                (1u64 << 24) * (i + 1) as u64 / workers as u64,
+            )
+        })
+        .collect();
+    let chunks = std::thread::scope(|scope| -> std::io::Result<Vec<MergeChunk>> {
+        let mut handles = Vec::with_capacity(workers);
+        for &(lo, hi) in &ranges {
+            let remap = &remap;
+            handles.push(scope.spawn(move || -> std::io::Result<MergeChunk> {
+                let mut cursors = Vec::with_capacity(inputs.len());
+                for inp in inputs {
+                    cursors.push(Cursor::open(inp.shard)?);
                 }
-            }
+                for c in &mut cursors {
+                    while c.cur.is_some_and(|(t, _)| (t as u64) < lo) {
+                        c.skip()?;
+                    }
+                }
+                let (mut table, mut postings) = (Vec::new(), Vec::new());
+                let (mut raw, mut ids, mut merged, mut enc) =
+                    (Vec::new(), Vec::new(), Vec::<(u32, u8)>::new(), Vec::new());
+                let mut count = 0usize;
+                while let Some(t) = cursors
+                    .iter()
+                    .filter_map(|c| c.cur.map(|x| x.0))
+                    .filter(|t| (*t as u64) < hi)
+                    .min()
+                {
+                    merged.clear();
+                    let mut sources = 0;
+                    for (k, c) in cursors.iter_mut().enumerate() {
+                        if c.cur.map(|x| x.0) != Some(t) {
+                            continue;
+                        }
+                        c.take(&mut raw)?;
+                        decode_masks(&raw, &mut ids);
+                        let before = merged.len();
+                        for &(id, m) in &ids {
+                            if let Some(&nid) = remap[k].get(id as usize) {
+                                if nid != u32::MAX {
+                                    merged.push((nid, m));
+                                }
+                            }
+                        }
+                        if merged.len() > before {
+                            sources += 1;
+                        }
+                    }
+                    if sources > 1 {
+                        merged.sort_unstable_by_key(|x| x.0);
+                    }
+                    enc.clear();
+                    let mut last: i64 = -1;
+                    for &(id, m) in &merged {
+                        put_varint(&mut enc, (id as i64 - last - 1) as u64);
+                        enc.push(m);
+                        last = id as i64;
+                    }
+                    table.extend_from_slice(&t.to_le_bytes());
+                    table.extend_from_slice(&(postings.len() as u32).to_le_bytes());
+                    postings.extend_from_slice(&enc);
+                    count += 1;
+                }
+                Ok((table, postings, count))
+            }));
         }
-        n
-    };
-
+        let mut out = Vec::with_capacity(workers);
+        for handle in handles {
+            out.push(
+                handle
+                    .join()
+                    .map_err(|_| std::io::Error::other("merge worker panicked"))??,
+            );
+        }
+        Ok(out)
+    })?;
+    let ntri: usize = chunks.iter().map(|c| c.2).sum();
+    let post_len: usize = chunks.iter().map(|c| c.1.len()).sum();
+    if post_len > u32::MAX as usize {
+        return Err(std::io::Error::other("shard postings exceed 4 GiB"));
+    }
     let tmp = path.with_extension("tmp");
     let res = (|| -> std::io::Result<()> {
         let mut w = std::io::BufWriter::with_capacity(1 << 20, File::create(&tmp)?);
@@ -572,68 +668,20 @@ pub fn merge(inputs: &[MergeInput<'_>], path: &Path) -> std::io::Result<usize> {
         w.write_all(&(ntri as u32).to_le_bytes())?;
         w.write_all(&(docbuf.len() as u64).to_le_bytes())?;
         w.write_all(&((ntri * 8) as u64).to_le_bytes())?;
-        w.write_all(&0u64.to_le_bytes())?; // post_len, patched below
+        w.write_all(&(post_len as u64).to_le_bytes())?;
         w.write_all(&docbuf)?;
-        let table_off = (HEADER + docbuf.len()) as u64;
-        w.seek(SeekFrom::Start(table_off + (ntri * 8) as u64))?;
-        // The table is streamed through a second handle on the same file.
-        let mut tw = std::io::BufWriter::with_capacity(
-            1 << 16,
-            std::fs::OpenOptions::new().write(true).open(&tmp)?,
-        );
-        tw.seek(SeekFrom::Start(table_off))?;
-        let mut emitted = 0usize;
-        let (mut raw, mut ids, mut merged, mut enc) =
-            (Vec::new(), Vec::new(), Vec::<(u32, u8)>::new(), Vec::new());
-        let mut off: u64 = 0;
-        while let Some(t) = cursors.iter().filter_map(|c| c.cur.map(|x| x.0)).min() {
-            merged.clear();
-            let mut sources = 0;
-            for (k, c) in cursors.iter_mut().enumerate() {
-                if c.cur.map(|x| x.0) != Some(t) {
-                    continue;
-                }
-                c.take(&mut raw)?;
-                decode_masks(&raw, &mut ids);
-                let before = merged.len();
-                for &(id, m) in &ids {
-                    if let Some(&nid) = remap[k].get(id as usize) {
-                        if nid != u32::MAX {
-                            merged.push((nid, m));
-                        }
-                    }
-                }
-                if merged.len() > before {
-                    sources += 1;
-                }
+        let mut base = 0u64;
+        for (table, postings, _) in &chunks {
+            for entry in table.as_chunks::<8>().0 {
+                w.write_all(&entry[..4])?;
+                let off = u32::from_le_bytes(entry[4..8].try_into().unwrap()) as u64 + base;
+                w.write_all(&(off as u32).to_le_bytes())?;
             }
-            if sources > 1 {
-                merged.sort_unstable_by_key(|x| x.0);
-            }
-            enc.clear();
-            let mut last: i64 = -1;
-            for &(id, m) in &merged {
-                put_varint(&mut enc, (id as i64 - last - 1) as u64);
-                enc.push(m);
-                last = id as i64;
-            }
-            tw.write_all(&t.to_le_bytes())?;
-            tw.write_all(&(off as u32).to_le_bytes())?;
-            emitted += 1;
-            off += enc.len() as u64;
-            if off > u32::MAX as u64 {
-                return Err(std::io::Error::other("shard postings exceed 4 GiB"));
-            }
-            w.write_all(&enc)?;
+            base += postings.len() as u64;
         }
-        if emitted != ntri {
-            return Err(std::io::Error::other("merge: trigram count changed"));
+        for (_, postings, _) in &chunks {
+            w.write_all(postings)?;
         }
-        tw.flush()?;
-        tw.get_ref().sync_all().ok();
-        drop(tw);
-        w.seek(SeekFrom::Start(32))?;
-        w.write_all(&off.to_le_bytes())?;
         w.flush()?;
         w.get_ref().sync_all().ok();
         Ok(())
@@ -846,5 +894,58 @@ mod tests {
         let e = Shard::open(&out2).unwrap();
         assert_eq!(e.ndocs(), 0);
         assert_eq!(e.eval(&trigram::plan("hello", true).unwrap()), Some(vec![]));
+    }
+
+    #[test]
+    fn parallel_merge_matches_serial_bytes_with_duplicates_and_dead_docs() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = build(
+            dir.path(),
+            "parallel-a.shard",
+            &[
+                ("a", "alpha beta gamma"),
+                ("dup", "old duplicate text"),
+                ("dead", "removed tokens"),
+                ("z", "omega alpha"),
+            ],
+        );
+        let b = build(
+            dir.path(),
+            "parallel-b.shard",
+            &[
+                ("b", "beta delta epsilon"),
+                ("dup", "new duplicate text"),
+                ("y", "gamma omega"),
+            ],
+        );
+        let c = build(
+            dir.path(),
+            "parallel-c.shard",
+            &[("c", "alpha delta"), ("tail", "epsilon zeta eta theta")],
+        );
+        let alive_a = [true, true, false, true];
+        let alive_b = [true, true, true];
+        let inputs = [
+            MergeInput {
+                shard: &a,
+                alive: Some(&alive_a),
+            },
+            MergeInput {
+                shard: &b,
+                alive: Some(&alive_b),
+            },
+            MergeInput {
+                shard: &c,
+                alive: None,
+            },
+        ];
+        let serial = dir.path().join("serial.shard");
+        let parallel = dir.path().join("parallel.shard");
+        assert_eq!(merge_serial(&inputs, &serial).unwrap(), 7);
+        assert_eq!(merge_with_workers(&inputs, &parallel, 4).unwrap(), 7);
+        assert_eq!(
+            std::fs::read(serial).unwrap(),
+            std::fs::read(parallel).unwrap()
+        );
     }
 }

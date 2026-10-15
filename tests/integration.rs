@@ -178,6 +178,33 @@ fn corpus_rules_and_query_semantics() {
         })
         .unwrap();
     assert_eq!(rels(&root, &f.files), vec!["unicode.txt"]);
+    let fuzzy = e
+        .files(&FilesOpts {
+            root: root.clone(),
+            fuzzy: Some("uni".into()),
+            max_files: 100,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rels(&root, &fuzzy.files), vec!["unicode.txt"]);
+    let persisted = e
+        .files(&FilesOpts {
+            root: root.clone(),
+            fuzzy: Some("uni".into()),
+            frecency: true,
+            max_files: 100,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(rels(&root, &persisted.files), vec!["unicode.txt"]);
+    assert!(e.index_dir().join("frecency.json").exists());
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(e.index_dir().join("frecency.json")).unwrap())
+            .unwrap();
+    assert!(stored["entries"]
+        .as_object()
+        .unwrap()
+        .contains_key(&fuzzy.files[0]));
 
     // Matches carry line numbers and text.
     let r = e
