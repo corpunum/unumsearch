@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 360" width="900" height="360" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title>unumsearch: ripgrep reads every file to answer a question; unumsearch checks its index of clues and opens only the suspect files, with the same answer</title>
+  <style>
+    .note { font-size: 15px; fill: #e8edf7; opacity: 0; }
+    .big { font-size: 22px; font-weight: 800; fill: #e8edf7; }
+    .sub { font-size: 11px; fill: #93a1bd; letter-spacing: .12em; font-weight: 700; }
+    .rg { fill: #e5484d; }
+    .us { fill: #f5c542; }
+    /* 12 s loop: notes appear one by one and stay until the loop restarts */
+    .n1 { animation: note 12s infinite; animation-delay: 0s; }
+    .n2 { animation: note2 12s infinite; }
+    .n3 { animation: note3 12s infinite; }
+    .n4 { animation: note4 12s infinite; }
+    .n5 { animation: note5 12s infinite; }
+    @keyframes note  { 0% { opacity: 0 } 2% { opacity: 1 } 95% { opacity: 1 } 99%,100% { opacity: 0 } }
+    @keyframes note2 { 0%,10% { opacity: 0 } 12% { opacity: 1 } 95% { opacity: 1 } 99%,100% { opacity: 0 } }
+    @keyframes note3 { 0%,31% { opacity: 0 } 33% { opacity: 1 } 95% { opacity: 1 } 99%,100% { opacity: 0 } }
+    @keyframes note4 { 0%,66% { opacity: 0 } 68% { opacity: 1 } 95% { opacity: 1 } 99%,100% { opacity: 0 } }
+    @keyframes note5 { 0%,78% { opacity: 0 } 80% { opacity: 1 } 95% { opacity: 1 } 99%,100% { opacity: 0 } }
+    /* ripgrep's read: a red scan line sweeps every file, 10% to 30% */
+    .scan { animation: scan 12s infinite; opacity: 0; }
+    @keyframes scan { 0%,10% { opacity: 0 } 11%,30% { opacity: .85 } 31%,100% { opacity: 0 } }
+    .read { animation: read 12s infinite; }
+    @keyframes read { 0%,10% { fill: #1c2540 } 12%,29% { fill: #3a2030 } 31%,100% { fill: #1c2540 } }
+    /* suspects light up when the lens reaches them */
+    .s1 { animation: s1 12s infinite; }
+    .s2 { animation: s2 12s infinite; }
+    .s3 { animation: s3 12s infinite; }
+    @keyframes s1 { 0%,10% { fill: #1c2540 } 12%,29% { fill: #3a2030 } 31%,41% { fill: #1c2540 } 43%,95% { fill: #f5c542 } 99%,100% { fill: #1c2540 } }
+    @keyframes s2 { 0%,10% { fill: #1c2540 } 12%,29% { fill: #3a2030 } 31%,51% { fill: #1c2540 } 53%,95% { fill: #f5c542 } 99%,100% { fill: #1c2540 } }
+    @keyframes s3 { 0%,10% { fill: #1c2540 } 12%,29% { fill: #3a2030 } 31%,61% { fill: #1c2540 } 63%,95% { fill: #f5c542 } 99%,100% { fill: #1c2540 } }
+    .stamp { animation: note5 12s infinite; }
+  </style>
+  <rect width="900" height="360" rx="18" fill="#0b1020"/>
+
+  <!-- case notebook (left) -->
+  <text x="34" y="44" class="sub">CASE FILE · 258,000 FILES</text>
+  <text x="34" y="78" class="big">Where is it?</text>
+  <text x="34" y="122" class="note n1">An agent asks: which files call this?</text>
+  <text x="34" y="156" class="note n2"><tspan class="rg">●</tspan> ripgrep reads every file: <tspan font-weight="800">4.0 s</tspan></text>
+  <text x="34" y="190" class="note n3"><tspan class="us">●</tspan> unumsearch checks its clue index</text>
+  <text x="52" y="210" class="note n3" style="font-size:12px;fill:#93a1bd">(which 3-letter pieces are in which file)</text>
+  <text x="34" y="244" class="note n4"><tspan class="us">●</tspan> and opens only the suspects: <tspan font-weight="800">0.22 s</tspan></text>
+  <text x="34" y="290" class="note n5" font-weight="700">Same files as ripgrep, 12 of 12.</text>
+  <text x="34" y="314" class="note n5" style="font-size:12px;fill:#93a1bd">real race, 12 agent queries, ~180 checkouts</text>
+
+  <!-- the wall of files (right): 10 x 5 -->
+  <defs>
+    <g id="f">
+      <path d="M0 0 h24 l10 10 v32 h-34 z"/>
+    </g>
+  </defs>
+  <g fill="#1c2540" stroke="#2c3a62" stroke-width="1">
+    <g class="read">
+      <use href="#f" x="380" y="60"/><use href="#f" x="428" y="60"/><use href="#f" x="476" y="60"/><use href="#f" x="524" y="60"/><use href="#f" x="572" y="60"/><use href="#f" x="620" y="60"/><use href="#f" x="668" y="60"/><use href="#f" x="716" y="60"/><use href="#f" x="764" y="60"/><use href="#f" x="812" y="60"/>
+      <use href="#f" x="380" y="116"/><use href="#f" x="428" y="116"/><use href="#f" x="524" y="116"/><use href="#f" x="572" y="116"/><use href="#f" x="620" y="116"/><use href="#f" x="668" y="116"/><use href="#f" x="716" y="116"/><use href="#f" x="812" y="116"/>
+      <use href="#f" x="380" y="172"/><use href="#f" x="428" y="172"/><use href="#f" x="476" y="172"/><use href="#f" x="524" y="172"/><use href="#f" x="572" y="172"/><use href="#f" x="620" y="172"/><use href="#f" x="668" y="172"/><use href="#f" x="716" y="172"/><use href="#f" x="764" y="172"/><use href="#f" x="812" y="172"/>
+      <use href="#f" x="380" y="228"/><use href="#f" x="428" y="228"/><use href="#f" x="476" y="228"/><use href="#f" x="524" y="228"/><use href="#f" x="572" y="228"/><use href="#f" x="668" y="228"/><use href="#f" x="716" y="228"/><use href="#f" x="764" y="228"/><use href="#f" x="812" y="228"/>
+      <use href="#f" x="380" y="284"/><use href="#f" x="428" y="284"/><use href="#f" x="476" y="284"/><use href="#f" x="524" y="284"/><use href="#f" x="572" y="284"/><use href="#f" x="620" y="284"/><use href="#f" x="668" y="284"/><use href="#f" x="716" y="284"/><use href="#f" x="764" y="284"/><use href="#f" x="812" y="284"/>
+    </g>
+    <use href="#f" x="476" y="116" class="s1"/>
+    <use href="#f" x="620" y="228" class="s2"/>
+    <use href="#f" x="764" y="116" class="s3"/>
+  </g>
+
+  <!-- ripgrep's scan line -->
+  <rect class="scan" x="372" y="50" width="4" height="286" rx="2" fill="#e5484d">
+    <animate attributeName="x" dur="12s" repeatCount="indefinite" calcMode="linear"
+      keyTimes="0;0.1;0.3;1" values="372;372;852;852"/>
+  </rect>
+
+  <!-- the detective's lens -->
+  <g opacity="0">
+    <animate attributeName="opacity" dur="12s" repeatCount="indefinite"
+      keyTimes="0;0.31;0.33;0.95;0.99;1" values="0;0;1;1;0;0"/>
+    <animateTransform attributeName="transform" type="translate" dur="12s" repeatCount="indefinite"
+      calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;.4 0 .2 1;.4 0 .2 1;.4 0 .2 1;0 0 1 1"
+      keyTimes="0;0.33;0.42;0.52;0.62;0.75;1" values="870 330;870 330;493 137;637 249;781 137;781 137;781 137"/>
+    <circle r="40" fill="#f5c542" fill-opacity=".08" stroke="#f5c542" stroke-width="5"/>
+    <circle r="40" fill="none" stroke="#fff4c7" stroke-width="1" opacity=".5"/>
+    <rect x="26" y="26" width="14" height="44" rx="6" fill="#c9a26b" transform="rotate(-45 26 26)"/>
+  </g>
+
+  <!-- verdict stamp -->
+  <g class="stamp" opacity="0">
+    <rect x="600" y="10" width="250" height="38" rx="8" fill="#0b1020" stroke="#f5c542" stroke-width="3" transform="rotate(-2 725 29)"/>
+    <text x="725" y="35" text-anchor="middle" font-size="17" font-weight="800" fill="#f5c542" letter-spacing=".1em" transform="rotate(-2 725 29)">FOUND · 18.6× FASTER</text>
+  </g>
+</svg>

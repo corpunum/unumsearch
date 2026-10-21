@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 330" width="900" height="330" font-family="ui-sans-serif, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+  <title>Median query time (p50) for 20 real agent regexes, 2026-10-09: whole tree of 247k files, ripgrep 347 ms, unumsearch daemon 64 ms, one-shot CLI 91 ms; one repository of 3.7k files, ripgrep 9.8 ms, daemon 2.3 ms, one-shot CLI 12 ms. During git branch switches, 64,454 answers marked fresh and complete were compared with ripgrep: 0 differed.</title>
+  <style>
+    .h { font-size: 12px; font-weight: 800; letter-spacing: .12em; fill: #93a1bd; }
+    .l { font-size: 13px; fill: #e8edf7; }
+    .v { font-size: 13px; font-weight: 800; fill: #e8edf7; }
+    .s { font-size: 11px; fill: #93a1bd; }
+    .grow { transform-box: fill-box; transform-origin: left; animation: grow 8s infinite; }
+    @keyframes grow { 0% { transform: scaleX(0) } 18% { transform: scaleX(1) } 94% { transform: scaleX(1) } 100% { transform: scaleX(0) } }
+  </style>
+  <rect width="900" height="330" rx="18" fill="#0b1020"/>
+
+  <!-- whole tree: 300 px = 347 ms -->
+  <text x="34" y="42" class="h">WHOLE TREE · 247K FILES · MEDIAN</text>
+  <text x="34" y="80" class="l">ripgrep</text>
+  <rect class="grow" x="172" y="66" width="300" height="20" rx="5" fill="#e5484d"/>
+  <text x="480" y="81" class="v">347 ms</text>
+  <text x="34" y="112" class="l">unumsearch daemon</text>
+  <rect class="grow" x="172" y="98" width="55" height="20" rx="5" fill="#f5c542"/>
+  <text x="235" y="113" class="v">64 ms</text>
+  <text x="34" y="144" class="l">one-shot CLI</text>
+  <rect class="grow" x="172" y="130" width="79" height="20" rx="5" fill="#c9a26b"/>
+  <text x="259" y="145" class="v">91 ms</text>
+
+  <!-- one repository: 300 px = 12 ms -->
+  <text x="34" y="196" class="h">ONE REPOSITORY · 3.7K FILES · MEDIAN</text>
+  <text x="34" y="234" class="l">ripgrep</text>
+  <rect class="grow" x="172" y="220" width="245" height="20" rx="5" fill="#e5484d"/>
+  <text x="425" y="235" class="v">9.8 ms</text>
+  <text x="34" y="266" class="l">unumsearch daemon</text>
+  <rect class="grow" x="172" y="252" width="58" height="20" rx="5" fill="#f5c542"/>
+  <text x="238" y="267" class="v">2.3 ms</text>
+  <text x="34" y="298" class="l">one-shot CLI</text>
+  <rect class="grow" x="172" y="284" width="300" height="20" rx="5" fill="#c9a26b"/>
+  <text x="480" y="299" class="v">12 ms</text>
+  <text x="532" y="299" class="s">← slower than rg here: keep the daemon running</text>
+
+  <!-- correctness card -->
+  <rect x="600" y="40" width="266" height="200" rx="14" fill="#1c2540" stroke="#30a46c" stroke-width="2"/>
+  <text x="733" y="72" text-anchor="middle" class="h" fill="#30a46c" style="fill:#30a46c">THE ALIBI CHECK</text>
+  <text x="733" y="118" text-anchor="middle" font-size="40" font-weight="800" fill="#30a46c">0 wrong</text>
+  <text x="733" y="148" text-anchor="middle" class="l">of 64,454 fresh answers</text>
+  <text x="733" y="168" text-anchor="middle" class="l">checked against ripgrep</text>
+  <text x="733" y="198" text-anchor="middle" class="s">while git checkout rewrote</text>
+  <text x="733" y="214" text-anchor="middle" class="s">up to 44,686 files (Linux kernel)</text>
+</svg>
