@@ -10,7 +10,7 @@ homepage = "https://github.com/corpunum/unumsearch"
 readme = "README.md"
 keywords = ["search", "grep", "index", "mcp", "trigram"]
 categories = ["command-line-utilities", "development-tools", "filesystem"]
-exclude = ["/bench", "/.github"]
+exclude = ["/bench", "/.github", "/docs/media"]
 
 [lib]
 name = "unumsearch"
