@@ -57,7 +57,7 @@ GLOBAL:
 
 fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("unumsearch: {msg}");
-    std::process::exit(2)
+    usage::cmd_exit(2)
 }
 
 /// Write a line to stdout; a closed pipe (`| head`) ends the process quietly.
@@ -65,7 +65,7 @@ fn out(line: &str) {
     use std::io::Write;
     let mut o = std::io::stdout().lock();
     if writeln!(o, "{line}").is_err() {
-        std::process::exit(0);
+        usage::cmd_exit(0);
     }
 }
 
@@ -154,7 +154,7 @@ fn main() {
     }
     let Some(cmd) = cmd else {
         print!("{USAGE}");
-        std::process::exit(2);
+        usage::cmd_exit(2);
     };
 
     // An explicit --root/--split-root describes the whole corpus: the roots
@@ -178,6 +178,15 @@ fn main() {
         cfg.max_memory_mb = m;
     }
 
+    // Local-only usage counter (subcommand name only; UNUM_USAGE=off disables).
+    usage::cmd_start(
+        "unumsearch",
+        match cmd.as_str() {
+            c @ ("index" | "search" | "files" | "excludes" | "status" | "watch" | "serve"
+            | "rpc" | "mcp") => c,
+            _ => "unknown",
+        },
+    );
     let mut sp = lexopt::Parser::from_args(rest);
     match cmd.as_str() {
         "index" => {
@@ -276,15 +285,18 @@ fn main() {
                             }
                         }
                         if r["files"].as_array().is_none_or(|a| a.is_empty()) {
+                            // no match is a normal outcome (grep convention), not a failure
+                            usage::cmd_end(true);
                             std::process::exit(1);
                         }
                     }
                     Ok(v) => print(&v),
                     Err(err) => {
                         print(&json!({"ok": false, "error": err}));
-                        std::process::exit(2);
+                        usage::cmd_exit(2);
                     }
                 }
+                usage::cmd_end(true);
                 return;
             }
             match e.search(&o) {
@@ -299,13 +311,14 @@ fn main() {
                         }
                     }
                     if r.files.is_empty() {
+                        usage::cmd_end(true);
                         std::process::exit(1);
                     }
                 }
                 Ok(r) => print(&json!({"ok": true, "result": r})),
                 Err(err) => {
                     print(&json!({"ok": false, "error": err}));
-                    std::process::exit(2);
+                    usage::cmd_exit(2);
                 }
             }
         }
@@ -368,7 +381,7 @@ fn main() {
                 Ok(r) => print(&json!({"ok": true, "result": r})),
                 Err(err) => {
                     print(&json!({"ok": false, "error": err}));
-                    std::process::exit(2);
+                    usage::cmd_exit(2);
                 }
             }
         }
@@ -421,4 +434,5 @@ fn main() {
         }
         other => die(format!("unknown command '{other}' (see --help)")),
     }
+    usage::cmd_end(true);
 }

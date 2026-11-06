@@ -18,7 +18,12 @@ pub fn handle_line(engine: &Engine, line: &str, scope: api::Scope) -> Option<Val
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
+    let mut span = usage::span("unumsearch", "route", super::known_method(method));
     let res = api::call_scoped(engine, method, &params, scope);
+    if res.is_err() {
+        span.fail();
+    }
+    drop(span);
     let id = id?; // notifications get no reply
     Some(match res {
         Ok(v) => json!({"jsonrpc": "2.0", "id": id, "result": v}),

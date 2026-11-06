@@ -187,10 +187,15 @@ pub fn serve(engine: Arc<Engine>) {
                 continue;
             }
             let _slot = (method != "status").then(|| engine.query_slot());
+            let mut span = usage::span("unumsearch", "route", super::known_method(method));
             match api::call_scoped(&engine, method, &query_params(&url), api::Scope::Confined) {
                 Ok(v) => respond(req, 200, &v),
-                Err(e) => respond(req, 400, &json!({"ok": false, "error": e})),
+                Err(e) => {
+                    span.fail();
+                    respond(req, 400, &json!({"ok": false, "error": e}))
+                }
             }
+            drop(span);
         }));
     }
     for h in handles {

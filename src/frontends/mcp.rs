@@ -113,7 +113,17 @@ pub fn handle(engine: &Engine, msg: &Value) -> Option<Value> {
         "tools/call" => {
             let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
             let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            match call_tool(engine, name, &args) {
+            let tool = match name {
+                t @ ("search" | "find_files" | "index_status") => t,
+                _ => "unknown",
+            };
+            let mut span = usage::span("unumsearch", "mcp", tool);
+            let called = call_tool(engine, name, &args);
+            if called.is_err() {
+                span.fail();
+            }
+            drop(span);
+            match called {
                 Ok(v) => {
                     json!({"content": [{"type": "text", "text": v.to_string()}], "structuredContent": v, "isError": false})
                 }

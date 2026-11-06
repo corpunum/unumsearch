@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Local usage counters.** Each CLI subcommand, daemon/RPC query and MCP tool call appends one line (timestamp, name, ok, ms; no arguments, paths or results) to `~/.local/share/unum-usage/unumsearch.jsonl` via the Apache-2.0 [`unum-usage`](https://github.com/corpunum/unum-usage) crate. Local file only, no network. Set `UNUM_USAGE=off` to disable.
+
 ## v0.1.8 (2026-10-29) - Faster Search and Fuzzy Filename Matching
 
 This release combines faster regex verification, faster shard merging, and fuzzy filename search. The README now leads with a story, with reference material and benchmarks split into dedicated docs.
