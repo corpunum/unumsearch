@@ -395,7 +395,7 @@ pub struct MergeInput<'a> {
 /// buffered `read`s rather than the mapping: a merge streams every posting
 /// list once, and reading it through the map would leave the whole shard
 /// resident in this process (and counted in its RSS).
-type MergeChunk = (Vec<u8>, Vec<u8>, usize);
+type MergeChunk = (Vec<u8>, Spill, usize);
 
 struct Cursor {
     table: std::io::BufReader<File>,
@@ -519,10 +519,89 @@ fn merge_serial(inputs: &[MergeInput<'_>], path: &Path) -> std::io::Result<usize
     merge_with_workers(inputs, path, 1)
 }
 
+/// Bytes of merged postings a merge worker holds before it moves them to a
+/// temporary file. A merge used to keep the whole output shard (up to about
+/// 64 MB, whatever `max_memory_mb` said) in memory until it was written.
+const SPILL_AT: usize = 4 << 20;
+
+/// An append-only byte buffer that continues in a file once it is large.
+struct Spill {
+    buf: Vec<u8>,
+    file: Option<File>,
+    path: std::path::PathBuf,
+    len: u64,
+    at: usize,
+}
+
+impl Spill {
+    fn new(path: std::path::PathBuf, at: usize) -> Spill {
+        Spill {
+            buf: Vec::new(),
+            file: None,
+            path,
+            len: 0,
+            at,
+        }
+    }
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.buf.extend_from_slice(bytes);
+        self.len += bytes.len() as u64;
+        if self.buf.len() >= self.at {
+            if self.file.is_none() {
+                self.file = Some(
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .create(true)
+                        .truncate(true)
+                        .open(&self.path)?,
+                );
+            }
+            if let Some(f) = self.file.as_mut() {
+                f.write_all(&self.buf)?;
+            }
+            self.buf.clear();
+        }
+        Ok(())
+    }
+
+    /// Write everything pushed so far, in order, to `w`.
+    fn copy_to(&mut self, w: &mut impl Write) -> std::io::Result<()> {
+        if let Some(f) = self.file.as_mut() {
+            use std::io::Seek;
+            f.seek(std::io::SeekFrom::Start(0))?;
+            std::io::copy(f, w)?;
+        }
+        w.write_all(&self.buf)
+    }
+}
+
+impl Drop for Spill {
+    fn drop(&mut self) {
+        if self.file.take().is_some() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 fn merge_with_workers(
     inputs: &[MergeInput<'_>],
     path: &Path,
     workers: usize,
+) -> std::io::Result<usize> {
+    merge_spilling(inputs, path, workers, SPILL_AT)
+}
+
+fn merge_spilling(
+    inputs: &[MergeInput<'_>],
+    path: &Path,
+    workers: usize,
+    spill_at: usize,
 ) -> std::io::Result<usize> {
     if crate::engine::FAIL_SHARD_WRITES.load(std::sync::atomic::Ordering::Relaxed) {
         return Err(std::io::Error::other("simulated disk write failure"));
@@ -583,7 +662,7 @@ fn merge_with_workers(
             )
         })
         .collect();
-    let chunks = std::thread::scope(|scope| -> std::io::Result<Vec<MergeChunk>> {
+    let mut chunks = std::thread::scope(|scope| -> std::io::Result<Vec<MergeChunk>> {
         let mut handles = Vec::with_capacity(workers);
         for &(lo, hi) in &ranges {
             let remap = &remap;
@@ -597,7 +676,10 @@ fn merge_with_workers(
                         c.skip()?;
                     }
                 }
-                let (mut table, mut postings) = (Vec::new(), Vec::new());
+                let (mut table, mut postings) = (
+                    Vec::new(),
+                    Spill::new(path.with_extension(format!("m{}.tmp", lo >> 8)), spill_at),
+                );
                 let (mut raw, mut ids, mut merged, mut enc) =
                     (Vec::new(), Vec::new(), Vec::<(u32, u8)>::new(), Vec::new());
                 let mut count = 0usize;
@@ -639,7 +721,7 @@ fn merge_with_workers(
                     }
                     table.extend_from_slice(&t.to_le_bytes());
                     table.extend_from_slice(&(postings.len() as u32).to_le_bytes());
-                    postings.extend_from_slice(&enc);
+                    postings.push(&enc)?;
                     count += 1;
                 }
                 Ok((table, postings, count))
@@ -656,7 +738,7 @@ fn merge_with_workers(
         Ok(out)
     })?;
     let ntri: usize = chunks.iter().map(|c| c.2).sum();
-    let post_len: usize = chunks.iter().map(|c| c.1.len()).sum();
+    let post_len: usize = chunks.iter().map(|c| c.1.len() as usize).sum();
     if post_len > u32::MAX as usize {
         return Err(std::io::Error::other("shard postings exceed 4 GiB"));
     }
@@ -677,10 +759,10 @@ fn merge_with_workers(
                 let off = u32::from_le_bytes(entry[4..8].try_into().unwrap()) as u64 + base;
                 w.write_all(&(off as u32).to_le_bytes())?;
             }
-            base += postings.len() as u64;
+            base += postings.len();
         }
-        for (_, postings, _) in &chunks {
-            w.write_all(postings)?;
+        for (_, postings, _) in &mut chunks {
+            postings.copy_to(&mut w)?;
         }
         w.flush()?;
         w.get_ref().sync_all().ok();
@@ -944,8 +1026,25 @@ mod tests {
         assert_eq!(merge_serial(&inputs, &serial).unwrap(), 7);
         assert_eq!(merge_with_workers(&inputs, &parallel, 4).unwrap(), 7);
         assert_eq!(
-            std::fs::read(serial).unwrap(),
+            std::fs::read(&serial).unwrap(),
             std::fs::read(parallel).unwrap()
         );
+        // Postings that leave memory for a temporary file (here after every
+        // few bytes) give the same shard, and the temporary files are gone.
+        for (workers, at) in [(1, 1), (4, 1), (4, 7), (3, 64)] {
+            let spilled = dir.path().join("spilled.shard");
+            assert_eq!(merge_spilling(&inputs, &spilled, workers, at).unwrap(), 7);
+            assert_eq!(
+                std::fs::read(&serial).unwrap(),
+                std::fs::read(&spilled).unwrap(),
+                "workers {workers}, spill at {at}"
+            );
+        }
+        let left: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
     }
 }

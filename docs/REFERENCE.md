@@ -288,9 +288,18 @@ request surface every front-end uses.
   against the corpus rules (gitignore, excludes, size): churn in ignored files does not make a unit
   dirty. Changed files are searched directly until the unit's rebuild (debounced) replaces its
   shards; directory moves and ignore-file edits mark the unit not fresh until then.
+- **Hot directories**: a unit in which an indexed file is rewritten all the time (a state file,
+  a journal) is rebuilt at most once per `rebuild_backoff_factor` (20) times its last build time,
+  never more often than `debounce_ms`; while it stays hot the interval doubles per rebuild, up to
+  `rebuild_backoff_max_ms` (5 minutes). Answers stay exact and `fresh` meanwhile, because the
+  changed files are searched directly. A change that cannot be searched directly (a directory
+  move, an ignore-file edit, more than 2,000 changed files) waits only twice the build time.
+  `status` shows such a unit as `dirty` between rebuilds. Better still, exclude paths that are
+  written every second and that nobody searches.
 - **Rebuilds**: the unit is listed again and compared with its indexed documents (path, size,
   change time = the later of mtime and ctime). Only new and changed files, and files an event
-  reported, are read, on up to 8 threads (one per 24 MiB of `max_memory_mb`: 4 by default),
+  reported, are read, on up to 8 threads (one per 24 MiB of what the daemon's heap leaves of
+  `max_memory_mb`: 4 by default),
   into small shards; those and the surviving documents of the old shards are merged into shards of about
   64 MB by decoding and renumbering posting lists, without reading any file. Shards with nothing
   dropped are kept as they are, so one edit rewrites one shard. `index --force` rebuilds from

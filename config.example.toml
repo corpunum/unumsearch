@@ -23,10 +23,12 @@ default_excludes = true    # build/vendor/binary defaults (secrets are excluded 
 gitignore = true           # respect .gitignore/.ignore like ripgrep
 hidden = true              # include hidden files (like rg --hidden)
 max_file_size = 1048576    # bytes; larger files are not indexed
-max_memory_mb = 96         # index-build memory budget
+max_memory_mb = 96         # memory budget: builds get what the daemon heap leaves of it
 listen = "127.0.0.1:7781"  # HTTP API for `serve`
 debounce_ms = 500          # quiet period before a changed unit is rebuilt
 max_wait_ms = 10000        # upper bound under continuous changes
+rebuild_backoff_factor = 20      # a unit is rebuilt at most once per 20 x its last build time (0 = off)
+rebuild_backoff_max_ms = 300000  # ... and at least this often while it keeps changing
 rescan_secs = 300          # full rescan (catches anything the watcher missed)
 watch = true               # filesystem notifications
 threads = 0                # 0 = auto (max 8)

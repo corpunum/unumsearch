@@ -84,6 +84,14 @@ pub struct UnitState {
     /// Do not retry a failed rebuild before this time.
     #[serde(skip)]
     pub retry_at_ms: u64,
+    /// When the last rebuild that wrote shards finished (this process only):
+    /// the start of the minimum rebuild interval.
+    #[serde(skip)]
+    pub last_build_ms: u64,
+    /// Rebuilds in a row that each came as soon as the minimum interval
+    /// allowed: the unit is hot, and the interval doubles with each.
+    #[serde(skip)]
+    pub hot_streak: u32,
 }
 
 /// What a filesystem event changed in a unit.
@@ -151,7 +159,7 @@ pub struct Engine {
     manifest_stamp: Mutex<Option<(SystemTime, u64, u64)>>,
     pub(crate) watched_dirs: Mutex<HashSet<PathBuf>>,
     pub(crate) need_unit_scan: AtomicBool,
-    doc_sets: Mutex<HashMap<String, Arc<HashSet<String>>>>,
+    doc_sets: Mutex<HashMap<String, Arc<Vec<u64>>>>,
     /// Last shard generation handed out (strictly increasing).
     last_gen: AtomicU64,
     /// Configured roots in both spellings (as written, canonical).
@@ -950,7 +958,12 @@ impl Engine {
         self.unit_for(&g, p)
     }
 
-    /// Is `rel` an indexed document of `unit`?
+    /// Is `rel` an indexed document of `unit`? Answered from a sorted list
+    /// of 64-bit path hashes per unit (8 bytes a document instead of the
+    /// path itself: the daemon's idle heap must stay well inside
+    /// `max_memory_mb` for a corpus of hundreds of thousands of files). A
+    /// hash collision could only report an unindexed path as indexed, which
+    /// costs one direct verification of that file.
     pub fn is_indexed(&self, unit: &str, rel: &str) -> bool {
         let set = {
             let mut cache = self.doc_sets.lock().unwrap();
@@ -958,21 +971,32 @@ impl Engine {
                 s.clone()
             } else {
                 let g = self.inner.read().unwrap();
-                let set: HashSet<String> = g
+                let mut set: Vec<u64> = g
                     .shards
                     .get(unit)
                     .map(|v| {
                         v.iter()
-                            .flat_map(|s| s.docs().map(|d| d.rel.to_string()))
+                            .flat_map(|s| s.docs().map(|d| path_hash(d.rel)))
                             .collect()
                     })
                     .unwrap_or_default();
+                drop(g);
+                set.sort_unstable();
+                set.dedup();
+                set.shrink_to_fit();
+                // The cache as a whole is bounded too: an eighth of the
+                // memory budget (1.5 million documents at the default).
+                let cap = ((self.cfg.max_memory_mb.max(16) as usize) << 20) / 8 / 8;
+                let held: usize = cache.values().map(|v| v.len()).sum();
+                if held + set.len() > cap {
+                    cache.clear();
+                }
                 let set = Arc::new(set);
                 cache.insert(unit.to_string(), set.clone());
                 set
             }
         };
-        set.contains(rel)
+        set.binary_search(&path_hash(rel)).is_ok()
     }
 
     pub fn mark_dirty(&self, unit: &str, change: Change) {
@@ -1048,7 +1072,39 @@ impl Engine {
         }
     }
 
-    /// Units whose debounce window has passed.
+    /// Shortest time between two rebuilds of a unit that keeps changing:
+    /// `rebuild_backoff_factor` times its last build time, at least the
+    /// debounce and at most `rebuild_backoff_max_ms`. A unit whose files
+    /// change every second would otherwise be rebuilt back to back (each
+    /// build rewriting a shard and the manifest). While the unit stays hot
+    /// (each rebuild following the previous one as soon as it was allowed)
+    /// the interval doubles per rebuild, up to the same cap: build time
+    /// bounds the CPU share, but a small unit with a 10 MB shard would still
+    /// write that shard once a second.
+    ///
+    /// Waiting is safe only while every change is a known file: those are
+    /// verified directly by each search (the pending overlay), so answers
+    /// stay exact. A unit with an unknown change is not fresh until rebuilt;
+    /// it only gets a short pause of twice its build time, which bounds the
+    /// work at two thirds of one thread.
+    fn min_rebuild_interval_ms(&self, u: &UnitState) -> u64 {
+        let k = self.cfg.rebuild_backoff_factor;
+        if k == 0 {
+            return 0;
+        }
+        let cap = self.cfg.rebuild_backoff_max_ms;
+        if u.pending_unknown {
+            return u.build_ms.saturating_mul(2).min(cap);
+        }
+        u.build_ms
+            .saturating_mul(k)
+            .max(self.cfg.debounce_ms)
+            .saturating_mul(1u64 << u.hot_streak.min(20))
+            .min(cap)
+    }
+
+    /// Units whose debounce window has passed (and, for a unit rebuilt
+    /// recently, its minimum rebuild interval).
     pub fn due_units(&self) -> Vec<String> {
         let g = self.inner.read().unwrap();
         let t = now_ms();
@@ -1059,6 +1115,7 @@ impl Engine {
                     && t >= u.retry_at_ms
                     && (t.saturating_sub(u.last_event_ms) >= self.cfg.debounce_ms
                         || t.saturating_sub(u.dirty_since_ms) >= self.cfg.max_wait_ms)
+                    && t.saturating_sub(u.last_build_ms) >= self.min_rebuild_interval_ms(u)
             })
             .map(|u| u.path.clone())
             .collect()
@@ -1075,6 +1132,7 @@ impl Engine {
         let prev_shards;
         let pending_at_start: std::collections::BTreeSet<String>;
         let (dirty_age_ms, quiet_ms);
+        let hot_window;
         {
             let mut g = self.inner.write().unwrap();
             let u = g.m.units.get_mut(unit)?;
@@ -1096,6 +1154,7 @@ impl Engine {
             quiet_ms = now_ms().saturating_sub(u.last_event_ms);
             prev_shards = u.shards.clone();
             pending_at_start = u.pending.clone();
+            hot_window = self.min_rebuild_interval_ms(u);
         }
         // A failed rebuild keeps the old index, keeps every change that was
         // pending, and marks the unit not fresh until a later build succeeds.
@@ -1255,7 +1314,15 @@ impl Engine {
                 u.bytes = total;
                 u.binary_skipped = files.len().saturating_sub(docs);
                 u.indexed_at_ms = now_ms();
+                // Hot: this rebuild followed the last one within twice the
+                // interval that was in force (plus the debounce slack).
+                let gap = u.indexed_at_ms.saturating_sub(u.last_build_ms);
+                let slack = self.cfg.debounce_ms.max(self.cfg.max_wait_ms);
+                let hot = u.last_build_ms != 0
+                    && gap <= hot_window.saturating_mul(2).saturating_add(slack);
+                u.hot_streak = if hot { (u.hot_streak + 1).min(20) } else { 0 };
                 u.build_ms = t0.elapsed().as_millis() as u64;
+                u.last_build_ms = u.indexed_at_ms;
                 u.ready = true;
                 u.error = None;
                 u.failures = 0;
@@ -1286,8 +1353,19 @@ impl Engine {
         self.cfg
             .thread_count()
             .min(MAX_BUILD_THREADS)
-            .min((self.cfg.max_memory_mb / BUILD_THREAD_MB) as usize)
+            .min((self.build_budget() >> 20) / BUILD_THREAD_MB as usize)
             .max(1)
+    }
+
+    /// Bytes a rebuild may allocate: `max_memory_mb` less the heap the
+    /// process already holds (watch tables, the manifest, caches), so that
+    /// the daemon as a whole stays inside the budget while it builds, not
+    /// only the builder. Never less than a quarter of the budget (or 16 MiB),
+    /// below which builds would crawl.
+    fn build_budget(&self) -> usize {
+        let budget = (self.cfg.max_memory_mb.max(16) as usize) << 20;
+        let held = anon_rss_bytes().unwrap_or(0) as usize;
+        budget.saturating_sub(held).max(budget / 4).max(16 << 20)
     }
 
     /// Index `files[idx]` (in listing order) into new shard files ("pieces"),
@@ -1309,7 +1387,7 @@ impl Engine {
         }
         const BLOCK: usize = 64;
         let threads = self.build_threads().min(idx.len().div_ceil(BLOCK));
-        let budget = (self.cfg.max_memory_mb.max(16) as usize) << 20;
+        let budget = self.build_budget();
         // Postings are roughly a third of a builder's footprint at flush time.
         let flush_at = match self.piece_flush.load(Ordering::Relaxed) {
             0 => budget / 3 / threads,
@@ -2350,6 +2428,33 @@ fn in_sub(sub: &str, rel: &str) -> bool {
     sub.is_empty()
         || rel == sub
         || (rel.len() > sub.len() && rel.starts_with(sub) && rel.as_bytes()[sub.len()] == b'/')
+}
+
+/// Stable 64-bit hash of a unit-relative path (FNV-1a with a final mix).
+fn path_hash(rel: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in rel.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^= h >> 32;
+    h = h.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    h ^ (h >> 29)
+}
+
+/// Anonymous (heap) memory of this process, where the platform reports it.
+pub fn anon_rss_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let s = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = s.lines().find(|l| l.starts_with("RssAnon:"))?;
+        let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb << 10)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 /// Return freed heap to the OS after a build. Index building allocates in

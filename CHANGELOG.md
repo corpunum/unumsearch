@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased
+## v0.1.9 (2026-11-10) - Hot Directories
+
+A directory in which an indexed file is rewritten every second no longer keeps the daemon busy.
+Found on a rig where a 42 MB state file and several journals lived inside an indexed workspace:
+the unit was rebuilt back to back for days, at a quarter of a core and several MB/s of index
+writes. No API or index-format change.
+
+- **Minimum rebuild interval per unit.** A unit is rebuilt at most once per 20 times its last
+  build time (`rebuild_backoff_factor`), never more often than `debounce_ms`. While the unit stays
+  hot the interval doubles per rebuild, up to 5 minutes (`rebuild_backoff_max_ms`). Searches stay
+  exact and `fresh`: changed files are verified directly, as before. A change the overlay cannot
+  represent waits only twice the build time. `rebuild_backoff_factor = 0` restores the old
+  behaviour. Measured on a 2,311-file unit with one 112 KB file rewritten every second for 60 s
+  (`tests/hot_unit.rs` covers the logic): index writes 537 MB -> 62 MB, daemon CPU 2.7 s -> 0.6 s,
+  every one of the 60 searches exact and fresh.
+- **`max_memory_mb` counts the daemon's own heap.** A rebuild gets the budget less what the
+  process already holds (never less than a quarter of it), instead of the whole budget on top.
+- **Merges no longer hold the output shard in memory.** The parallel merge of v0.1.8 kept each
+  worker's postings (together up to a whole 64 MB shard) in memory until the shard was written.
+  A worker now moves its postings to a temporary file past 4 MiB. Output bytes are identical.
+- **Smaller watcher tables.** "Is this path indexed?" is answered from 64-bit path hashes
+  (8 bytes per document) instead of a set of path strings per unit, and that cache is bounded by
+  an eighth of the budget.
 
 - **Local usage counters.** Each CLI subcommand, daemon/RPC query and MCP tool call appends one line (timestamp, name, ok, ms; no arguments, paths or results) to `~/.local/share/unum-usage/unumsearch.jsonl` via the Apache-2.0 [`unum-usage`](https://github.com/corpunum/unum-usage) crate. Local file only, no network. Set `UNUM_USAGE=off` to disable.
 

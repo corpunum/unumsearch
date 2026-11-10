@@ -177,6 +177,14 @@ pub struct Config {
     pub debounce_ms: u64,
     /// Upper bound on how long a continuously-changing unit waits.
     pub max_wait_ms: u64,
+    /// A unit that keeps changing is rebuilt at most once per
+    /// `rebuild_backoff_factor` times its last build time (and never more
+    /// often than `debounce_ms`), so a hot directory costs a bounded share
+    /// of a core and of disk writes. Searches stay exact meanwhile: changed
+    /// files are verified directly. 0 disables the back-off.
+    pub rebuild_backoff_factor: u64,
+    /// Upper bound of that interval.
+    pub rebuild_backoff_max_ms: u64,
     /// Full rescan interval (catches anything the watcher missed).
     pub rescan_secs: u64,
     /// Use filesystem notifications (otherwise only periodic rescans).
@@ -208,6 +216,8 @@ impl Default for Config {
             auth_token: None,
             debounce_ms: 500,
             max_wait_ms: 10_000,
+            rebuild_backoff_factor: 20,
+            rebuild_backoff_max_ms: 300_000,
             rescan_secs: 300,
             watch: true,
             threads: 0,
