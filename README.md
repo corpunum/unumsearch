@@ -112,7 +112,7 @@ Checked, per-tool setup: [docs/integrations](docs/integrations/README.md).
 |---|---|
 | `unumsearch search PATTERN [PATH]` | content search: regex or `-F` literal, `-i`, `-g GLOB`, `-l`, `--text` |
 | `unumsearch files [PATH]` | filename search: globs, `--regex`, `--fuzzy` with optional frecency |
-| `unumsearch serve` | watcher + HTTP API on `127.0.0.1:7781` (`/search`, `/files`, `/lookup`, `/status`, `/rpc`) |
+| `unumsearch serve` | watcher + HTTP API on `127.0.0.1:7781` (`/search`, `/files`, `/lookup`, `/status`, `/health`, `/rpc`) |
 | `unumsearch rpc` / `mcp` | JSON-RPC 2.0 or MCP over stdio (`search`, `find_files`, `index_status`) |
 | Rust library | `Engine::open`, `engine.search(...)`, `watch::run`, `api::call` |
 

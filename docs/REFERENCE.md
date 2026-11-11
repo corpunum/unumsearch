@@ -201,9 +201,14 @@ RPC and MCP front-ends refuse such roots outright).
 
 ## HTTP and JSON-RPC API
 
-`GET /status`, `GET /search`, `GET /files`, `GET /lookup`, and `POST /rpc` (a JSON-RPC 2.0
-message). The same methods (`search`, `files`, `lookup`, `status`, `reindex`) are available over
+`GET /health`, `GET /status`, `GET /search`, `GET /files`, `GET /lookup`, and `POST /rpc` (a
+JSON-RPC 2.0 message). The same methods (`search`, `files`, `lookup`, `status`, `reindex`) are available over
 `unumsearch rpc`.
+
+`GET /health` answers `{"ok", "name", "version", "git_sha", "started_at"}` without touching the
+index: which build is running (the commit it was built from; `unknown` outside a git checkout)
+and since when (RFC 3339 UTC). Use it for liveness and to notice a daemon older than the installed
+source.
 
 `search` parameters: `pattern` (required), `root`, `mode` (`literal` default, or `regex`),
 `ignore_case`/`ci`, `glob` (comma-separated or repeated), `files_only`, `candidates_only`,

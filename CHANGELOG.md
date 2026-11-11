@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **`GET /health`** on the HTTP API: `ok`, `name`, `version`, `git_sha` (the commit the binary was
+  built from, embedded by `build.rs`; `UNUM_GIT_SHA` overrides, `unknown` outside a checkout) and
+  `started_at`. It does not touch the index, so monitors can poll it during a rebuild.
+
 ## v0.1.9 (2026-11-10) - Hot Directories
 
 A directory in which an indexed file is rewritten every second no longer keeps the daemon busy.
