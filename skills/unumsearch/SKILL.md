@@ -18,6 +18,9 @@ and filename queries from it. Output is JSON on stdout.
 
 ## Commands
 
+Output is always JSON (one object on stdout); no flag is needed, and `--json`
+is accepted as a no-op. Pass the directory as the last positional argument.
+
 ```bash
 # Content search: regex by default (ripgrep syntax), -F for a literal string.
 unumsearch search 'fn\s+main' /path/to/repo

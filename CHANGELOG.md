@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- **`--json` is accepted** (a no-op) by `search`, `files`, `index` and before the command. Output
+  was always JSON, but agents add the flag out of habit and got "invalid option '--json'": a
+  local-model OpenUnum worker following the skill spent its whole budget on that. `--json` after
+  `--text` switches back to JSON. The skill now says that no flag is needed.
+
 ## v0.1.10 (2026-11-11) - Health and Windows Watches
 
 - **`GET /health`** on the HTTP API: `ok`, `name`, `version`, `git_sha` (the commit the binary was

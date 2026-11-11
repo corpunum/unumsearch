@@ -19,7 +19,7 @@ USAGE:
 
 COMMANDS:
   index [--force]                 build or update the index once
-  search PATTERN [PATH]           content search (JSON output)
+  search PATTERN [PATH]           content search (JSON output; --json is accepted, a no-op)
       -F, --literal               literal string (default: regex, like ripgrep)
       -i, --ignore-case           case-insensitive
       -g, --glob GLOB             include/exclude glob (repeatable, '!' negates)
@@ -140,6 +140,8 @@ fn main() {
                 print!("{USAGE}");
                 return;
             }
+            // JSON is the default output; accepted before the command too.
+            Long("json") => {}
             Short('V') | Long("version") => {
                 println!("unumsearch {}", env!("CARGO_PKG_VERSION"));
                 return;
@@ -194,6 +196,7 @@ fn main() {
             while let Some(a) = sp.next().unwrap_or_else(|e| die(e)) {
                 match a {
                     Long("force") => force = true,
+                    Long("json") => {}
                     o => die(o.unexpected()),
                 }
             }
@@ -246,6 +249,8 @@ fn main() {
                     Long("candidates") => o.candidates_only = true,
                     Long("no-scan") => o.scan_fallback = false,
                     Long("text") => text = true,
+                    // Output is JSON already; agents often add --json anyway.
+                    Long("json") => text = false,
                     Short('e') | Long("regexp") => pos.insert(
                         0,
                         sp.value()
@@ -367,6 +372,7 @@ fn main() {
                             .unwrap_or_else(|e| die(e))
                     }
                     Long("no-scan") => o.scan_fallback = false,
+                    Long("json") => {}
                     Value(v) => path = Some(v.string().unwrap_or_else(|e| die(e))),
                     o => die(o.unexpected()),
                 }

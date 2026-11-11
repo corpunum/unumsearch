@@ -303,3 +303,44 @@ fn run_stdio_with(global: &[&str], args: &[&str], input: &str) -> Vec<Value> {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect()
 }
+
+/// Agents habitually add `--json`; output is JSON already, so it must be
+/// accepted (a no-op) instead of failing with "invalid option" (found when a
+/// local-model OpenUnum worker followed the skill, 2026-11-11).
+#[test]
+fn json_flag_is_accepted_as_a_no_op() {
+    let (_t, root, idx) = setup();
+    let cfg = empty_config(&idx);
+    let base = [
+        "--config",
+        cfg.as_str(),
+        "--root",
+        root.as_str(),
+        "--index-dir",
+        idx.as_str(),
+    ];
+    for args in [
+        vec!["index", "--json"],
+        vec!["--json", "search", "-F", "alpha_beta", root.as_str()],
+        vec!["search", "-F", "alpha_beta", root.as_str(), "--json"],
+        vec![
+            "search",
+            "--text",
+            "--json",
+            "-F",
+            "alpha_beta",
+            root.as_str(),
+        ],
+        vec!["files", root.as_str(), "--json", "-g", "*.rs"],
+    ] {
+        let out = bin().args(base).args(&args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("{args:?}: not JSON ({e})"));
+        assert_eq!(v["ok"], true, "{args:?}: {v}");
+    }
+}
