@@ -2,14 +2,16 @@
 
 Update this file with every change that alters state, open work or how to ship. Newest state on top.
 
-## State (2026-11-11)
+## State (2026-11-11, evening)
 
-- Released: **v0.1.9** (2026-11-10, hot directories). `main` is one change ahead: `GET /health`
-  (`ok`, `name`, `version`, `git_sha`, `started_at`), see `CHANGELOG.md` "Unreleased".
+- **v0.1.10** (2026-11-11): `GET /health` (`ok`, `name`, `version`, `git_sha`, `started_at`) and
+  the Windows watcher fix for #7 (every rescan re-adds each unit's watches and re-lists it; a
+  watched unit is fresh only if listed within 2x `rescan_secs`). `tests/rearm.rs` forces the
+  re-arm path on every OS (`watch::FORCE_REARM`, `watch::REARMS` are test hooks).
 - CI: `ci.yml` (lint, tests on Linux x86/arm, macOS, Windows, static musl builds) and `release.yml`
   (on a `v*` tag). Docs-only pushes skip CI (`paths-ignore`).
 - `build.rs` embeds the build commit as `UNUM_GIT_SHA`. Set `UNUM_GIT_SHA` in the environment to
-  override it; outside a git checkout it is `unknown`. `cargo publish --dry-run` stays clean.
+  override it; outside a git checkout it is `unknown`.
 
 ## How to ship
 
@@ -22,16 +24,18 @@ Update this file with every change that alters state, open work or how to ship. 
 
 ## Open work
 
-- **#7** Windows watcher drops buffer overflows silently. Blocks 0.2.0 and the crates.io publish
-  (the publish itself is an owner step: `cargo login` + `cargo publish`).
-- **crates.io publish is also blocked by the `unum-usage` dependency**: it has only a git source,
-  and `cargo publish --dry-run` fails with "dependency `unum-usage` does not specify a version".
-  Either publish `unum-usage` first and add `version = "0.1"` next to the git pin, or put the
-  counters behind an optional feature that the published crate leaves off.
+- **crates.io publish** (owner approved option a, 11-11): `unum-usage` 0.1.0 first. Its
+  `cargo publish --dry-run` is clean with `~/.cargo/bin` cargo (the system cargo cannot read the
+  v4 lock file); the names `unum-usage` and `unumsearch` were free on 11-11. Owner step:
+  `cargo login`, then `cd ~/unum-usage && cargo publish`. Then add `version = "0.1"` next to the
+  git pin of `unum-usage` here, re-run `cargo publish --dry-run`, and the unumsearch publish is a
+  second owner step. Without that, the dry-run fails: "dependency `unum-usage` does not specify a
+  version".
+- **notify 9**: its Windows backend re-arms after an overflow and emits a `Rescan` event (which
+  the event loop already maps to `mark_all_dirty`). Once 9.0 is stable (rc.8 on 11-11, MSRV 1.91),
+  upgrading may let the per-rescan re-arm go; keep the freshness bound until verified on Windows.
 - Delta shard for a changed file instead of a base rewrite, and the heartbeat out of
   `manifest.json` (the remaining parts of the hot-directory work; back-off shipped in 0.1.9).
-- Release that carries `/health` (0.1.10 or 0.2.0), then deploy it so monitors can compare the
-  running build with `main`.
 - `/health` sits behind the same token rule as the other routes when `auth_token` is set.
 
 ## Traps

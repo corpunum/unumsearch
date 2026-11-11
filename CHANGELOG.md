@@ -1,10 +1,19 @@
 # Changelog
 
-## Unreleased
+## v0.1.10 (2026-11-11) - Health and Windows Watches
 
 - **`GET /health`** on the HTTP API: `ok`, `name`, `version`, `git_sha` (the commit the binary was
   built from, embedded by `build.rs`; `UNUM_GIT_SHA` overrides, `unknown` outside a checkout) and
   `started_at`. It does not touch the index, so monitors can poll it during a rebuild.
+- **Windows: a silently dropped watch no longer keeps a unit `fresh` (#7).** notify 8's
+  ReadDirectoryChangesW backend unwatches a directory on a buffer overflow
+  (`ERROR_NOTIFY_ENUM_DIR`) without an event or an error, and a zero-byte completion is parsed as
+  nothing; a large burst (a branch switch, an unpacked archive) could then leave a unit answering
+  `fresh: true` while later changes were missed. On Windows every rescan now drops and re-adds each
+  unit's watches before listing it again, and a watched unit counts as fresh only if it was listed
+  within twice `rescan_secs`. A lost burst is found within one rescan interval. Query latency is
+  unchanged; other platforms are unchanged. (notify 9 reports the overflow as a rescan, which
+  unumsearch already handles; it is still a release candidate and needs Rust 1.91.)
 
 ## v0.1.9 (2026-11-10) - Hot Directories
 
