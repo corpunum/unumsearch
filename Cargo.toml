@@ -35,7 +35,7 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 dirs = "6"
 tiny_http = "0.12"
 lexopt = "0.3"
-unum-usage = { git = "https://github.com/corpunum/unum-usage", rev = "8e521e179066a5f3ae9b7ae3a33ecb1797a9c962" }
+unum-usage = { version = "0.1", git = "https://github.com/corpunum/unum-usage", rev = "8e521e179066a5f3ae9b7ae3a33ecb1797a9c962" }
 
 [dev-dependencies]
 tempfile = "3"
