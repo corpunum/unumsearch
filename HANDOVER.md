@@ -19,7 +19,8 @@ Update this file with every change that alters state, open work or how to ship. 
    `cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets`.
 2. One push to `main`; wait for CI to end green.
 3. Release: bump `Cargo.toml` + `CHANGELOG.md`, tag `vX.Y.Z`, push the tag (`release.yml` builds
-   the binaries). Then replace the installed binary and restart the daemon; check
+   the binaries). Tag by hand only a commit unumship has already shipped green (its rebased sha on
+   `origin/main`, not the local one); unumship has no tag command yet. Then replace the installed binary and restart the daemon; check
    `curl 127.0.0.1:7781/health` shows the new `git_sha`.
 
 ## Open work
@@ -36,6 +37,8 @@ Update this file with every change that alters state, open work or how to ship. 
   upgrading may let the per-rescan re-arm go; keep the freshness bound until verified on Windows.
 - Delta shard for a changed file instead of a base rewrite, and the heartbeat out of
   `manifest.json` (the remaining parts of the hot-directory work; back-off shipped in 0.1.9).
+- crates.io: after each release, `cargo publish` from the shipped commit (the crate records the
+  commit it was built from). Check the version numbers first: a version cannot be re-uploaded.
 - `/health` sits behind the same token rule as the other routes when `auth_token` is set.
 
 ## Traps
