@@ -317,7 +317,7 @@ request surface every front-end uses.
 | Linux x86_64 (glibc, musl static) | Built, tested, in daily use. |
 | Linux aarch64 (musl static) | Cross-built with `rust-lld`; index, search, watcher and daemon verified on an aarch64 Android phone running Linux. CI runs the test suite on arm64. |
 | macOS (arm64, x86_64) | Test suite runs in CI (arm64); release binaries for both. FSEvents recursive watches. |
-| Windows x86_64 | Test suite runs in CI; release binary with static CRT. Replaced shards that are still mapped are removed at the next start. |
+| Windows x86_64 | Test suite runs in CI; release binary with static CRT. Replaced shards that are still mapped are removed at the next start. ReadDirectoryChangesW can drop a watch on a buffer overflow without reporting it, so every rescan (`rescan_secs`) re-adds the watches and re-lists each unit; a unit is `fresh` only if it was listed within twice that interval (a lost burst is found within one interval). |
 
 ## Limitations
 

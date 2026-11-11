@@ -30,6 +30,23 @@ const RECURSIVE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 /// macOS a watch change marks every unit as needing a re-listing.
 const STREAM_RESTARTS: bool = cfg!(target_os = "macos");
 
+/// notify 8's Windows backend (`ReadDirectoryChangesW`) reports a buffer
+/// overflow neither as an event nor as an error: on `ERROR_NOTIFY_ENUM_DIR`
+/// it quietly unwatches the directory, and a zero-byte completion parses as
+/// nothing (#7). A watch can therefore die without us knowing, and the unit
+/// would keep answering `fresh: true`. So on Windows every rescan drops and
+/// re-adds the watches before it re-lists each unit: a dead watch lives at
+/// most one rescan interval, and whatever it missed is found by the listing.
+const REARM_ON_RESCAN: bool = cfg!(target_os = "windows");
+
+/// Test hook: re-arm watches on every rescan on any platform.
+#[doc(hidden)]
+pub static FORCE_REARM: AtomicBool = AtomicBool::new(false);
+
+/// Test hook: how many times a unit's live watches were dropped and re-added.
+#[doc(hidden)]
+pub static REARMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn dirs_for(unit: &Path, files: &[FileEntry]) -> HashSet<PathBuf> {
     let mut dirs = HashSet::new();
     dirs.insert(unit.to_path_buf());
@@ -124,6 +141,31 @@ impl<W: Watcher> Ctx<W> {
         }
     }
 
+    /// Drop the unit's watches so the `build` that follows adds them again
+    /// and lists once more after doing so, which covers changes made while no
+    /// watch was in place. Until then the unit counts as unwatched (not
+    /// fresh), also when its build is skipped.
+    fn rearm(&mut self, unit: &str) {
+        let Some(w) = self.watcher.as_mut() else {
+            return;
+        };
+        let mut watched = self.engine.watched_dirs.lock().unwrap();
+        let mine: Vec<PathBuf> = watched
+            .iter()
+            .filter(|d| self.engine.unit_of_path(d).as_deref() == Some(unit))
+            .cloned()
+            .collect();
+        if !mine.is_empty() {
+            REARMS.fetch_add(1, Ordering::Relaxed);
+        }
+        for d in mine {
+            let _ = w.unwatch(&d);
+            watched.remove(&d);
+        }
+        drop(watched);
+        self.engine.set_watched(unit, false);
+    }
+
     fn build(&mut self, unit: &str) {
         // Changes made between a listing and the watches that cover them
         // would be missed until the next rescan, so after adding watches
@@ -141,10 +183,25 @@ impl<W: Watcher> Ctx<W> {
     fn rescan(&mut self) {
         let added = self.engine.sync_units();
         self.detach_missing();
+        let rearm =
+            self.watcher.is_some() && (REARM_ON_RESCAN || FORCE_REARM.load(Ordering::Relaxed));
+        if rearm {
+            // Split roots only report new units; a dead watch there delays
+            // a new unit until this rescan, which finds it anyway.
+            if let Some(w) = self.watcher.as_mut() {
+                for s in self.engine.cfg.split_paths() {
+                    let _ = w.unwatch(&s);
+                    let _ = w.watch(&s, RecursiveMode::NonRecursive);
+                }
+            }
+        }
         let mut all = self.engine.unit_paths();
         // New units first: they have no index at all yet.
         all.sort_by_key(|u| !added.contains(u));
         for u in all {
+            if rearm {
+                self.rearm(&u);
+            }
             self.build(&u);
         }
         self.engine.heartbeat();

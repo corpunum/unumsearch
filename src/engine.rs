@@ -24,6 +24,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// notify 8's Windows backend can lose a watch without reporting it (#7);
+/// see `watch::REARM_ON_RESCAN`.
+const WATCH_CAN_DIE_SILENTLY: bool = cfg!(target_os = "windows");
+
 //
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -1756,8 +1760,11 @@ impl Engine {
                 // file: those files are verified directly (see `pending`).
                 let exact = !s.dirty || !u.pending_unknown;
                 // The writer with a watcher trusts only watched units; readers
-                // and watcher-less setups accept a recent rescan.
-                let tracked = s.watched || ((!self.writer || !self.cfg.watch) && alive && recent);
+                // and watcher-less setups accept a recent rescan. On Windows a
+                // watch can die silently (#7) and is re-armed by each rescan,
+                // so a watched unit must also have been listed recently.
+                let watch_ok = s.watched && (!WATCH_CAN_DIE_SILENTLY || recent);
+                let tracked = watch_ok || ((!self.writer || !self.cfg.watch) && alive && recent);
                 if !s.ready || !exact || !tracked {
                     fresh = false;
                 }
