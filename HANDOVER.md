@@ -24,6 +24,10 @@ Update this file with every change that alters state, open work or how to ship. 
 
 - **#7** Windows watcher drops buffer overflows silently. Blocks 0.2.0 and the crates.io publish
   (the publish itself is an owner step: `cargo login` + `cargo publish`).
+- **crates.io publish is also blocked by the `unum-usage` dependency**: it has only a git source,
+  and `cargo publish --dry-run` fails with "dependency `unum-usage` does not specify a version".
+  Either publish `unum-usage` first and add `version = "0.1"` next to the git pin, or put the
+  counters behind an optional feature that the published crate leaves off.
 - Delta shard for a changed file instead of a base rewrite, and the heartbeat out of
   `manifest.json` (the remaining parts of the hot-directory work; back-off shipped in 0.1.9).
 - Release that carries `/health` (0.1.10 or 0.2.0), then deploy it so monitors can compare the
@@ -33,4 +37,7 @@ Update this file with every change that alters state, open work or how to ship. 
 ## Traps
 
 - The 4-OS matrix runs on every non-docs push; bundle changes into one push.
+- CI installs ripgrep on Linux from the upstream release tarball (pinned 14.1.1), with apt as the
+  fallback. On 2026-11-11 the apt mirrors did not resolve from the runners and both Linux test jobs
+  failed in the install step, twice.
 - `tests/hot_unit.rs` and the trust tests are timing-sensitive; run them without other heavy load.

@@ -41,7 +41,20 @@ jobs:
         shell: bash
         run: |
           case "$RUNNER_OS" in
-            Linux) sudo apt-get update -q && sudo apt-get install -y -q ripgrep ;;
+            Linux)
+              # The upstream release binary first: the apt mirrors were unresolvable from the
+              # runners on 2026-11-11 and each failed attempt cost four minutes. apt is the fallback.
+              v=14.1.1
+              case "$(uname -m)" in
+                x86_64) t=x86_64-unknown-linux-musl ;;
+                *) t=aarch64-unknown-linux-gnu ;;
+              esac
+              if curl -fsSL --retry 3 "https://github.com/BurntSushi/ripgrep/releases/download/$v/ripgrep-$v-$t.tar.gz" | tar xz -C "$RUNNER_TEMP"; then
+                sudo install "$RUNNER_TEMP/ripgrep-$v-$t/rg" /usr/local/bin/rg
+              else
+                sudo apt-get update -q && sudo apt-get install -y -q ripgrep
+              fi
+              rg --version | head -1 ;;
             macOS) brew install ripgrep ;;
             Windows) choco install ripgrep -y --no-progress ;;
           esac
