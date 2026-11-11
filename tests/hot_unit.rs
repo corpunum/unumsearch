@@ -34,7 +34,16 @@ fn setup(factor: u64, max_ms: u64) -> (tempfile::TempDir, std::path::PathBuf, Ar
         ..Config::default()
     };
     let e = Arc::new(Engine::open(cfg, true).unwrap());
+    let t0 = Instant::now();
     e.index_all(false);
+    // The first rebuild is due only once `factor` times the initial build
+    // time has passed. That build is a few ms on a developer machine, but a
+    // loaded CI runner (Windows, 2026-11-11) took long enough that the tests
+    // below gave up waiting. Wait the interval out instead of assuming it.
+    let wait = (t0.elapsed().as_millis() as u64)
+        .saturating_mul(factor)
+        .min(max_ms);
+    std::thread::sleep(Duration::from_millis(wait));
     (t, root, e)
 }
 
@@ -93,7 +102,10 @@ fn hot_unit_is_rebuilt_at_a_bounded_rate_and_stays_exact() {
     // Once the writer stops and the interval has passed, the unit is
     // rebuilt and clean again.
     let unit = root.to_string_lossy().into_owned();
-    let end = Instant::now() + Duration::from_secs(10);
+    // The interval is 20 x the last build time, doubled while the unit is
+    // hot; a slow runner needs far longer than a fast one. The loop ends as
+    // soon as the unit is clean.
+    let end = Instant::now() + Duration::from_secs(120);
     loop {
         for u in e.due_units() {
             e.build_unit(&u, false);

@@ -40,4 +40,7 @@ Update this file with every change that alters state, open work or how to ship. 
 - CI installs ripgrep on Linux from the upstream release tarball (pinned 14.1.1), with apt as the
   fallback. On 2026-11-11 the apt mirrors did not resolve from the runners and both Linux test jobs
   failed in the install step, twice.
-- `tests/hot_unit.rs` and the trust tests are timing-sensitive; run them without other heavy load.
+- `tests/hot_unit.rs` and the trust tests are timing-sensitive. `hot_unit` assumed the initial
+  index takes a few ms; on a slow Windows runner (2026-11-11) the first rebuild was then not due
+  within the test's 5 s. `setup` now waits out the initial interval. If it flakes again, look at
+  the fixed 1.3 s / 1.5 s windows in the same file.
