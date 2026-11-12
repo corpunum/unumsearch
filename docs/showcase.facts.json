@@ -3,7 +3,7 @@
   "repo": "corpunum/unumsearch",
   "oneLiner": "A trigram-indexed search engine for code and files that answers like ripgrep, usually in milliseconds, for AI coding agents and humans.",
   "license": "Apache-2.0",
-  "version": "v0.1.11",
+  "version": "v0.1.12",
   "updated": "2026-11-12",
   "quickstart": {
     "lang": "bash",

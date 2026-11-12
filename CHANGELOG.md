@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.12 (2026-11-12) - Watches That Stay True
 
 - **`status` is not `fresh` before the daemon has looked at its roots.** In its first moments a
   daemon has no units yet, and `fresh` over no units was `true`: a client that waited for

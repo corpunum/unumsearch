@@ -2,9 +2,22 @@
 
 Update this file with every change that alters state, open work or how to ship. Newest state on top.
 
-## State (2026-11-12, morning)
+## State (2026-11-12, afternoon)
 
-- **Unreleased (queued 11-12):** `-h/--help` on every command and `files -m`. Rescan back-off:
+- **v0.1.12** (2026-11-12): two reviews (Opus) of 0.1.11 and the day's watch work found and
+  fixed several ways a unit could say `fresh` while missing files, all on Linux's per-directory
+  watches: a directory removed and created again, the watch record drifting after an event-queue
+  overflow, split roots and nested roots, a deleted unit root. Also: readers see state changes
+  within a beat again (regression in 0.1.11), `status` is not fresh before the first unit sync,
+  rescan back-off, watches on directories without indexed files, small units listed serially
+  (`examples/list_bench.rs`), `-h/--help` everywhere and `files -m`. See CHANGELOG.
+- Release steps now: `unumship release --repo unumsearch --tag vX.Y.Z` tags a shipped-green head;
+  a fix for a red head is queued with `unumship request --fixes <red sha>`. Bump `version` in
+  `docs/showcase.facts.json` with every release (the site reads it).
+- Open: the exclude matcher is rebuilt per unit at each listing (about 0.8 to 1.0 s per pass on
+  the rig); the cost of re-adding ~100k inotify watches after an overflow is unmeasured.
+
+- **Details of 0.1.12:** `-h/--help` on every command and `files -m`. Rescan back-off:
   a clean watched unit is listed every 2nd, then every 4th rescan (`rescan_backoff_max`, default
   4, 1 = off), and a miss resets every unit; Windows and watcher-less setups are never backed off.
   Linux now also watches directories that hold no indexed file (the listing hands them to
