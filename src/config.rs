@@ -187,6 +187,14 @@ pub struct Config {
     pub rebuild_backoff_max_ms: u64,
     /// Full rescan interval (catches anything the watcher missed).
     pub rescan_secs: u64,
+    /// A watched unit that is clean and whose re-listing found nothing the
+    /// watcher had missed is listed again at a growing interval: every 2nd,
+    /// then every 4th rescan, up to every `rescan_backoff_max`th. Any rescan
+    /// that finds a change the watcher missed, in any unit, puts every unit
+    /// back to every rescan. Windows (watches can die silently), units
+    /// without a working watch and split roots' own units are listed at every
+    /// rescan. 1 lists every unit at every rescan.
+    pub rescan_backoff_max: u32,
     /// Use filesystem notifications (otherwise only periodic rescans).
     pub watch: bool,
     /// Threads used to verify candidates and walk trees (0 = auto, capped at 8).
@@ -219,6 +227,7 @@ impl Default for Config {
             rebuild_backoff_factor: 20,
             rebuild_backoff_max_ms: 300_000,
             rescan_secs: 300,
+            rescan_backoff_max: 4,
             watch: true,
             threads: 0,
             max_result_mb: 48,

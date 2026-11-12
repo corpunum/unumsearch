@@ -1102,6 +1102,26 @@ impl Engine {
         }
     }
 
+    /// For the rescan back-off: `Some(time of the unit's last rebuild that
+    /// wrote shards)` when the unit is indexed, watched and has nothing
+    /// pending, known or unknown. A split root's own unit never qualifies:
+    /// only its listing finds new hidden directories (`uncovered`).
+    pub fn rescan_clean(&self, unit: &str) -> Option<u64> {
+        if self.is_flat_unit(unit) {
+            return None;
+        }
+        let g = self.inner.read().unwrap();
+        let u = g.m.units.get(unit)?;
+        let clean = u.ready
+            && u.watched
+            && !u.dirty
+            && !u.building
+            && !u.pending_unknown
+            && u.pending.is_empty()
+            && u.error.is_none();
+        clean.then_some(u.last_build_ms)
+    }
+
     pub fn set_watched(&self, unit: &str, ok: bool) {
         if let Some(u) = self.inner.write().unwrap().m.units.get_mut(unit) {
             u.watched = ok;

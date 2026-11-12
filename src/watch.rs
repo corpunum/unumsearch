@@ -10,7 +10,9 @@
 //!
 //! Whatever the watcher misses (overflowed queues, exhausted watch limits,
 //! network filesystems) the periodic rescan catches: it re-lists every unit
-//! and rebuilds those whose size/mtime fingerprint moved.
+//! and rebuilds those whose size/mtime fingerprint moved. A watched unit
+//! that stays clean is re-listed at a growing interval (up to every
+//! `rescan_backoff_max`th rescan), except where watches can die silently.
 
 use crate::engine::{Change, Engine};
 use crate::walk::{self, FileEntry};
@@ -47,6 +49,24 @@ pub static FORCE_REARM: AtomicBool = AtomicBool::new(false);
 #[doc(hidden)]
 pub static REARMS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Test hook: rescan interval in milliseconds (0: `rescan_secs`).
+#[doc(hidden)]
+pub static RESCAN_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Test hook: rescans run, and units a rescan did not list (back-off).
+#[doc(hidden)]
+pub static RESCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[doc(hidden)]
+pub static RESCAN_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Per-unit rescan back-off: `clean` re-listings in a row that found nothing
+/// the watcher had missed, and rescans skipped since the last listing.
+#[derive(Default)]
+struct Backoff {
+    clean: u32,
+    skipped: u32,
+}
+
 fn dirs_for(unit: &Path, files: &[FileEntry]) -> HashSet<PathBuf> {
     let mut dirs = HashSet::new();
     dirs.insert(unit.to_path_buf());
@@ -64,6 +84,7 @@ fn dirs_for(unit: &Path, files: &[FileEntry]) -> HashSet<PathBuf> {
 struct Ctx<W: Watcher> {
     engine: Arc<Engine>,
     watcher: Option<W>,
+    backoff: HashMap<String, Backoff>,
 }
 
 impl<W: Watcher> Ctx<W> {
@@ -198,12 +219,50 @@ impl<W: Watcher> Ctx<W> {
         let mut all = self.engine.unit_paths();
         // New units first: they have no index at all yet.
         all.sort_by_key(|u| !added.contains(u));
-        for u in all {
+        // The back-off relies on the watches: never without a watcher, and
+        // never where a watch can die unnoticed (each rescan re-arms them).
+        let max_every = self.engine.cfg.rescan_backoff_max.max(1);
+        let may_skip = self.watcher.is_some() && !rearm && max_every > 1;
+        let mut missed = false;
+        for u in &all {
             if rearm {
-                self.rearm(&u);
+                self.rearm(u);
             }
-            self.build(&u);
+            let before = self.engine.rescan_clean(u);
+            if may_skip && before.is_some() {
+                let b = self.backoff.entry(u.clone()).or_default();
+                let every = (1u32 << b.clean.min(16)).min(max_every);
+                if b.skipped + 1 < every {
+                    b.skipped += 1;
+                    RESCAN_SKIPS.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            }
+            self.build(u);
+            match (before, self.engine.rescan_clean(u)) {
+                (Some(a), Some(b)) if a == b => {
+                    let b = self.backoff.entry(u.clone()).or_default();
+                    b.clean = b.clean.saturating_add(1);
+                    b.skipped = 0;
+                }
+                // Clean and watched before and after, yet the listing
+                // changed the index: the watcher missed something. Trust no
+                // unit's watches until its listings are clean again.
+                (Some(_), Some(_)) => missed = true,
+                // Not clean (an event arrived during the build, it failed,
+                // the watches could not be added): this unit starts over.
+                _ => {
+                    self.backoff.remove(u);
+                }
+            }
         }
+        if missed {
+            self.backoff.clear();
+        } else {
+            let live: HashSet<&String> = all.iter().collect();
+            self.backoff.retain(|u, _| live.contains(u));
+        }
+        RESCANS.fetch_add(1, Ordering::Relaxed);
         self.engine.checkpoint();
         crate::engine::release_memory();
     }
@@ -350,6 +409,7 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
     let mut ctx = Ctx {
         engine: engine.clone(),
         watcher,
+        backoff: HashMap::new(),
     };
     // Split roots are watched themselves so new units appear promptly.
     if let Some(w) = ctx.watcher.as_mut() {
@@ -361,7 +421,10 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
 
     let debug = std::env::var_os("UNUMSEARCH_DEBUG_EVENTS").is_some();
     ctx.rescan();
-    let rescan_every = Duration::from_secs(engine.cfg.rescan_secs.max(10));
+    let rescan_every = match RESCAN_MS.load(Ordering::Relaxed) {
+        0 => Duration::from_secs(engine.cfg.rescan_secs.max(10)),
+        ms => Duration::from_millis(ms),
+    };
     let mut last_rescan = Instant::now();
     let mut last_beat = Instant::now();
     let mut last_publish = Instant::now();

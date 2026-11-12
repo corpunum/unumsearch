@@ -30,6 +30,7 @@ max_wait_ms = 10000        # upper bound under continuous changes
 rebuild_backoff_factor = 20      # a unit is rebuilt at most once per 20 x its last build time (0 = off)
 rebuild_backoff_max_ms = 300000  # ... and at least this often while it keeps changing
 rescan_secs = 300          # full rescan (catches anything the watcher missed)
+rescan_backoff_max = 4     # a clean watched unit is re-listed at least every 4th rescan (1 = every one)
 watch = true               # filesystem notifications
 threads = 0                # 0 = auto (max 8)
 max_result_mb = 48         # per-query result memory; past it the answer is truncated (complete: false)

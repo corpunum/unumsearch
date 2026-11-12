@@ -5,6 +5,15 @@
 - **Every command takes `-h`/`--help`**, and an option a command does not take now says
   `(see unumsearch --help)`. `files` accepts `-m N` (and `--max-files N`) for its cap, like
   `search -m`. Agents try these first; before, each was an "invalid option" error.
+- **Rescans back off for watched units that stay clean.** The periodic rescan listed every unit
+  every `rescan_secs`: on the rig 2,100 units and 393k files, 5 to 18 s of listing (one 270k-file
+  unit 0.75 to 2.3 s warm, 7 s cold) every 5 minutes; the fingerprint is about 0.1 s of it. A
+  watched unit with nothing pending whose listing matched its index is now listed every 2nd, then
+  every 4th rescan (`rescan_backoff_max`, default 4; 1 restores the old behavior). A rescan that
+  finds a change the watcher missed puts every unit back to every rescan. Not backed off: units
+  without a working watch, split roots' own units (their listing finds new hidden directories),
+  setups without a watcher, and Windows, where each rescan re-arms the watches (#7). `fresh` is
+  unchanged: on Linux and macOS a watched unit never depended on a recent listing.
 
 ## v0.1.11 (2026-11-12) - Quieter Writer
 

@@ -293,6 +293,16 @@ request surface every front-end uses.
   against the corpus rules (gitignore, excludes, size): churn in ignored files does not make a unit
   dirty. Changed files are searched directly until the unit's rebuild (debounced) replaces its
   shards; directory moves and ignore-file edits mark the unit not fresh until then.
+- **Rescans**: every `rescan_secs` (300) the daemon lists units again and rebuilds any whose
+  listing moved. That catches what no watch reports: a file created in a directory that held no
+  indexed file (it has no watch), ignore files above a unit, changes made by another host on a
+  network filesystem. A watched unit that is clean and whose listings keep matching its index is
+  listed at a growing interval: every 2nd, then every 4th rescan (`rescan_backoff_max`, 1 = every
+  rescan), so at most 20 minutes apart by default. A rescan that finds a change the watcher
+  missed, in any unit, puts every unit back to every rescan. Units without a working watch, a
+  split root's own unit and every unit on Windows (where watches are re-armed at each rescan) are
+  listed at every rescan. On the rig's 2,100 units (393k files) a rescan lists for 5 to 18 s;
+  computing the fingerprints takes about 0.1 s of that.
 - **Hot directories**: a unit in which an indexed file is rewritten all the time (a state file,
   a journal) is rebuilt at most once per `rebuild_backoff_factor` (20) times its last build time,
   never more often than `debounce_ms`; while it stays hot the interval doubles per rebuild, up to
