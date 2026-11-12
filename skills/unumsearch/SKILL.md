@@ -31,9 +31,11 @@ unumsearch search --text 'needle' /path/to/repo                        # path:li
 # Filename search: globs and/or a regex on the relative path or basename.
 unumsearch files /path/to/repo -g '*.toml'
 unumsearch files /path/to/repo --regex '(^|/)Dockerfile$'
+unumsearch files /path/to/repo -g '*.rs' -m 50                          # cap the list
 
 # Index state.
 unumsearch status
+unumsearch search --help                                               # all options (any command)
 ```
 
 ## Reading results

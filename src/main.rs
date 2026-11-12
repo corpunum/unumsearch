@@ -17,7 +17,7 @@ const USAGE: &str = "unumsearch - always-fresh indexed file & code search
 USAGE:
   unumsearch [GLOBAL] <command> [ARGS]
 
-COMMANDS:
+COMMANDS (each accepts -h/--help):
   index [--force]                 build or update the index once
   search PATTERN [PATH]           content search (JSON output; --json is accepted, a no-op)
       -F, --literal               literal string (default: regex, like ripgrep)
@@ -34,7 +34,7 @@ COMMANDS:
       --regex RE                  regex on relative path or basename
       --fuzzy QUERY               fuzzy-match relative path and rank by match quality
       --frecency                   record and boost paths returned by fuzzy search
-      --max N                     cap (default 5000)
+      -m, --max N                 cap (default 5000; --max-files also works)
   status                          index status (JSON)
   excludes                        effective exclude patterns (for rg --ignore-file)
   watch                           keep the index fresh (foreground)
@@ -54,6 +54,17 @@ GLOBAL:
   --exclude PATTERN               extra gitignore-style exclude (repeatable)
   --max-memory-mb N               build memory budget
 ";
+
+/// `-h`/`--help` anywhere: the usage text on stdout, exit 0.
+fn help() -> ! {
+    print!("{USAGE}");
+    usage::cmd_exit(0)
+}
+
+/// An option the command does not take: say so and point at the usage.
+fn bad(a: lexopt::Arg<'_>) -> ! {
+    die(format!("{} (see `unumsearch --help`)", a.unexpected()))
+}
 
 fn die(msg: impl std::fmt::Display) -> ! {
     eprintln!("unumsearch: {msg}");
@@ -151,7 +162,7 @@ fn main() {
                 rest = p.raw_args().map(|r| r.collect()).unwrap_or_default();
                 break;
             }
-            other => die(other.unexpected()),
+            other => bad(other),
         }
     }
     let Some(cmd) = cmd else {
@@ -197,7 +208,8 @@ fn main() {
                 match a {
                     Long("force") => force = true,
                     Long("json") => {}
-                    o => die(o.unexpected()),
+                    Short('h') | Long("help") => help(),
+                    o => bad(o),
                 }
             }
             let e = Engine::open(cfg, true).unwrap_or_else(|e| die(e));
@@ -259,7 +271,8 @@ fn main() {
                             .unwrap_or_else(|e| die(e)),
                     ),
                     Value(v) => pos.push(v.string().unwrap_or_else(|e| die(e))),
-                    o => die(o.unexpected()),
+                    Short('h') | Long("help") => help(),
+                    o => bad(o),
                 }
             }
             if pos.is_empty() {
@@ -364,7 +377,7 @@ fn main() {
                                 .unwrap_or_else(|e| die(e)),
                         )
                     }
-                    Long("max") => {
+                    Short('m') | Long("max") | Long("max-files") => {
                         o.max_files = sp
                             .value()
                             .unwrap_or_else(|e| die(e))
@@ -374,7 +387,8 @@ fn main() {
                     Long("no-scan") => o.scan_fallback = false,
                     Long("json") => {}
                     Value(v) => path = Some(v.string().unwrap_or_else(|e| die(e))),
-                    o => die(o.unexpected()),
+                    Short('h') | Long("help") => help(),
+                    o => bad(o),
                 }
             }
             o.root = path
@@ -422,7 +436,8 @@ fn main() {
             while let Some(a) = sp.next().unwrap_or_else(|e| die(e)) {
                 match a {
                     Long("watch") => watch = true,
-                    o => die(o.unexpected()),
+                    Short('h') | Long("help") => help(),
+                    o => bad(o),
                 }
             }
             let e = Arc::new(Engine::open(cfg, watch).unwrap_or_else(|e| die(e)));

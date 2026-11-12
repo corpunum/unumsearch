@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- **Every command takes `-h`/`--help`**, and an option a command does not take now says
+  `(see unumsearch --help)`. `files` accepts `-m N` (and `--max-files N`) for its cap, like
+  `search -m`. Agents try these first; before, each was an "invalid option" error.
+
 ## v0.1.11 (2026-11-12) - Quieter Writer
 
 - **`--json` is accepted** (a no-op) by `search`, `files`, `index` and before the command. Output

@@ -344,3 +344,49 @@ fn json_flag_is_accepted_as_a_no_op() {
         assert_eq!(v["ok"], true, "{args:?}: {v}");
     }
 }
+
+#[test]
+fn every_command_takes_help_and_files_takes_m() {
+    let (_t, root, idx) = setup();
+    let cfg = empty_config(&idx);
+    let base = [
+        "--config",
+        cfg.as_str(),
+        "--root",
+        root.as_str(),
+        "--index-dir",
+        idx.as_str(),
+    ];
+    for args in [
+        vec!["index", "--help"],
+        vec!["search", "--help"],
+        vec!["files", "-h"],
+        vec!["mcp", "--help"],
+    ] {
+        let out = bin().args(base).args(&args).output().unwrap();
+        assert!(out.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("COMMANDS"),
+            "{args:?}: no usage"
+        );
+    }
+    let out = bin()
+        .args(base)
+        .args(["files", root.as_str(), "-m", "1"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["result"]["files"].as_array().unwrap().len(), 1, "{v}");
+    let out = bin()
+        .args(base)
+        .args(["files", "--bogus"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("unumsearch --help"));
+}
