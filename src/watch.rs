@@ -258,6 +258,12 @@ impl<W: Watcher> Ctx<W> {
         if RECURSIVE {
             return;
         }
+        // Unwatched first: the unwatch loop below takes hundreds of ms on a
+        // big tree, and a status read meanwhile must not call a unit fresh
+        // whose watches are going away.
+        for u in self.engine.unit_paths() {
+            self.engine.set_watched(&u, false);
+        }
         {
             let mut watched = self.engine.watched_dirs.lock().unwrap();
             if let Some(w) = self.watcher.as_mut() {
@@ -266,9 +272,6 @@ impl<W: Watcher> Ctx<W> {
                 }
             }
             watched.clear();
-        }
-        for u in self.engine.unit_paths() {
-            self.engine.set_watched(&u, false);
         }
         // A split root's watch went with the rest, and the lost events may
         // include a new child directory: watch the roots again at once and
