@@ -12,7 +12,7 @@ Update this file with every change that alters state, open work or how to ship. 
   `RESCANS`, `RESCAN_SKIPS`, `DROP_WATCHES` (drops a watch silently, as a lost watch would).
 - **Old branches dropped (11-12, corpunum-82's decision):** `s1/improve-v0.2.0` and its worktree
   `~/.openunum/worktrees/unumsearch-s1`, saved first in `~/openunum-backups/unumsearch-s1-20261112/`
-  (3 patches, plus the uncommitted diff and untracked files). Nine stale local branches from
+  (3 patches, plus the uncommitted diff and untracked files). Ten stale local branches from
   10-09 to 10-12 were also removed; the 5 with commits not on main are saved as patches in
   `~/openunum-backups/unumsearch-branches-20261112/` (with `branch-tips.txt`). No remote
   branches besides `main`.
