@@ -63,6 +63,10 @@ pub static RESCAN_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 #[doc(hidden)]
 pub static DROP_WATCHES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
+/// Test hook: treat the next loop iteration as an event-queue overflow.
+#[doc(hidden)]
+pub static FORCE_OVERFLOW: AtomicBool = AtomicBool::new(false);
+
 /// Per-unit rescan back-off: `clean` re-listings in a row that found nothing
 /// the watcher had missed, and rescans skipped since the last listing.
 #[derive(Default)]
@@ -128,6 +132,9 @@ impl<W: Watcher> Ctx<W> {
                 if w.watch(&d, RecursiveMode::NonRecursive).is_ok() {
                     watched.insert(d);
                     added += 1;
+                } else if !d.exists() {
+                    // Removed between the listing and now: nothing to watch;
+                    // its parent's watch reports a re-creation.
                 } else {
                     ok = false;
                 }
@@ -202,14 +209,16 @@ impl<W: Watcher> Ctx<W> {
     /// does not follow. Drop the watches at and below it, so that the
     /// rebuild this event causes adds them again. (A recursive watch follows
     /// paths below the unit by itself.)
-    fn forget(&mut self, dir: &Path) {
+    fn forget(&mut self, unit: &str, dir: &Path) {
         if RECURSIVE {
             return;
         }
         let mut watched = self.engine.watched_dirs.lock().unwrap();
+        // Only this unit's watches: a split root's event must not strip the
+        // watches of its child units, which no rebuild here would restore.
         let gone: Vec<PathBuf> = watched
             .iter()
-            .filter(|d| d.starts_with(dir))
+            .filter(|d| d.starts_with(dir) && self.engine.unit_of_path(d).as_deref() == Some(unit))
             .cloned()
             .collect();
         for d in gone {
@@ -217,6 +226,28 @@ impl<W: Watcher> Ctx<W> {
                 let _ = w.unwatch(&d);
             }
             watched.remove(&d);
+        }
+    }
+
+    /// Events were lost, so `watched_dirs` may no longer match the real
+    /// watches (a directory removed and re-created leaves a stale entry that
+    /// `attach` would skip). Drop every watch and mark every unit unwatched;
+    /// the rebuilds that follow attach them again.
+    fn drop_all_watches(&mut self) {
+        if RECURSIVE {
+            return;
+        }
+        {
+            let mut watched = self.engine.watched_dirs.lock().unwrap();
+            if let Some(w) = self.watcher.as_mut() {
+                for d in watched.iter() {
+                    let _ = w.unwatch(d);
+                }
+            }
+            watched.clear();
+        }
+        for u in self.engine.unit_paths() {
+            self.engine.set_watched(&u, false);
         }
     }
 
@@ -281,7 +312,13 @@ impl<W: Watcher> Ctx<W> {
                 // Clean and watched before and after, yet the listing
                 // changed the index: the watcher missed something. Trust no
                 // unit's watches until its listings are clean again.
-                (Some(_), Some(_)) => missed = true,
+                (Some(_), Some(_)) => {
+                    missed = true;
+                    if !RECURSIVE {
+                        self.rearm(u);
+                        self.build(u);
+                    }
+                }
                 // Not clean (an event arrived during the build, it failed,
                 // the watches could not be added): this unit starts over.
                 _ => {
@@ -484,7 +521,9 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
         const PUBLISH_GAP: Duration = Duration::from_millis(5);
         let mut deferred = false;
         loop {
-            if overflow.swap(false, Ordering::Relaxed) {
+            let forced = FORCE_OVERFLOW.swap(false, Ordering::Relaxed);
+            if overflow.swap(false, Ordering::Relaxed) || forced {
+                ctx.drop_all_watches();
                 engine.mark_all_dirty();
                 changed = true;
                 deferred = true;
@@ -501,6 +540,7 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                         continue;
                     }
                     if ev.need_rescan() {
+                        ctx.drop_all_watches();
                         engine.mark_all_dirty();
                         changed = true;
                         deferred = true;
@@ -528,7 +568,7 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                         if engine.saturated(&unit) {
                             engine.mark_dirty(&unit, Change::Unknown);
                             if stale {
-                                ctx.forget(p);
+                                ctx.forget(&unit, p);
                             }
                             continue;
                         }
@@ -540,7 +580,7 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                             changed = true;
                         }
                         if stale {
-                            ctx.forget(p);
+                            ctx.forget(&unit, p);
                         }
                     }
                     if changed {
