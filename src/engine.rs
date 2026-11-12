@@ -193,6 +193,9 @@ pub struct Engine {
     /// Hash of the manifest content (without `heartbeat_ms`) as last saved:
     /// [`Engine::heartbeat`] saves again only when it differs.
     saved_hash: AtomicU64,
+    /// Serializes manifest saves (watcher thread and API reindex share the
+    /// same temp file). Taken before `inner`, never while holding it.
+    save_lock: Mutex<()>,
 }
 
 /// A held query slot; dropping it lets a waiting query run.
@@ -629,6 +632,7 @@ impl Engine {
             piece_flush: AtomicU64::new(0),
             racy_ns: AtomicU64::new(RACY_NS as u64),
             saved_hash: AtomicU64::new(0),
+            save_lock: Mutex::new(()),
             anchors: OnceLock::new(),
             running: (Mutex::new(0), std::sync::Condvar::new()),
             splits: OnceLock::new(),
@@ -826,15 +830,15 @@ impl Engine {
         if !self.writer {
             return;
         }
-        let bytes = {
+        let _save = self.save_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let (hash, bytes) = {
             let mut g = self.inner.write().unwrap();
             let (h, zeroed) = self.content_hash(&mut g.m);
-            self.saved_hash.store(h, Ordering::Relaxed);
             g.m.heartbeat_ms = now_ms();
             // One serialization per save: put the beat into the bytes that
             // were hashed (the field comes before any unit data).
             const ZERO: &[u8] = b"\"heartbeat_ms\":0,";
-            match zeroed.windows(ZERO.len()).position(|w| w == ZERO) {
+            let out = match zeroed.windows(ZERO.len()).position(|w| w == ZERO) {
                 Some(at) => {
                     let mut out = Vec::with_capacity(zeroed.len() + 16);
                     out.extend_from_slice(&zeroed[..at]);
@@ -845,11 +849,16 @@ impl Engine {
                     out
                 }
                 None => serde_json::to_vec(&g.m).unwrap_or_default(),
-            }
+            };
+            (h, out)
         };
         let tmp = self.dir.join("manifest.json.tmp");
-        if std::fs::write(&tmp, bytes).is_ok() {
-            let _ = std::fs::rename(&tmp, self.manifest_path());
+        // Remembered only once written: a failed save is retried by the next
+        // heartbeat.
+        if std::fs::write(&tmp, bytes).is_ok()
+            && std::fs::rename(&tmp, self.manifest_path()).is_ok()
+        {
+            self.saved_hash.store(hash, Ordering::Relaxed);
         }
     }
 
