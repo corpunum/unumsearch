@@ -190,6 +190,9 @@ pub struct Engine {
     piece_flush: AtomicU64,
     /// See [`RACY_NS`] (test hook: [`Engine::set_racy_window_ns`]).
     racy_ns: AtomicU64,
+    /// Hash of the manifest content (without `heartbeat_ms`) as last saved:
+    /// [`Engine::heartbeat`] saves again only when it differs.
+    saved_hash: AtomicU64,
 }
 
 /// A held query slot; dropping it lets a waiting query run.
@@ -625,6 +628,7 @@ impl Engine {
             shard_target: AtomicU64::new(SHARD_TARGET),
             piece_flush: AtomicU64::new(0),
             racy_ns: AtomicU64::new(RACY_NS as u64),
+            saved_hash: AtomicU64::new(0),
             anchors: OnceLock::new(),
             running: (Mutex::new(0), std::sync::Condvar::new()),
             splits: OnceLock::new(),
@@ -824,15 +828,28 @@ impl Engine {
         }
         let bytes = {
             let mut g = self.inner.write().unwrap();
-            g.m.version = 1;
+            let h = self.content_hash(&mut g.m);
+            self.saved_hash.store(h, Ordering::Relaxed);
             g.m.heartbeat_ms = now_ms();
-            g.m.rescan_secs = self.cfg.rescan_secs;
             serde_json::to_vec(&g.m).unwrap_or_default()
         };
         let tmp = self.dir.join("manifest.json.tmp");
         if std::fs::write(&tmp, bytes).is_ok() {
             let _ = std::fs::rename(&tmp, self.manifest_path());
         }
+    }
+
+    /// Hash of what a save would write, apart from the beat time.
+    fn content_hash(&self, m: &mut Manifest) -> u64 {
+        use std::hash::{Hash, Hasher};
+        m.version = 1;
+        m.rescan_secs = self.cfg.rescan_secs;
+        let beat = std::mem::replace(&mut m.heartbeat_ms, 0);
+        let bytes = serde_json::to_vec(&*m).unwrap_or_default();
+        m.heartbeat_ms = beat;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut h);
+        h.finish()
     }
 
     fn heartbeat_path(&self) -> PathBuf {
@@ -857,6 +874,16 @@ impl Engine {
     pub fn heartbeat(&self) {
         if !self.writer {
             return;
+        }
+        // State changed in memory since the last save (a flag cleared by a
+        // rebuild that found nothing new, a watch that failed) must reach
+        // readers within a beat; an unchanged manifest is not rewritten.
+        let h = {
+            let mut g = self.inner.write().unwrap();
+            self.content_hash(&mut g.m)
+        };
+        if h != self.saved_hash.load(Ordering::Relaxed) {
+            self.save_manifest();
         }
         let tmp = self.dir.join("heartbeat.tmp");
         if std::fs::write(&tmp, now_ms().to_string()).is_ok() {
@@ -1097,6 +1124,12 @@ impl Engine {
     }
 
     pub fn mark_all_dirty(&self) {
+        self.mark_all_dirty_mem();
+        // Readers must stop answering `fresh` now, not at the next beat.
+        self.save_manifest();
+    }
+
+    fn mark_all_dirty_mem(&self) {
         let mut g = self.inner.write().unwrap();
         let t = now_ms();
         for u in g.m.units.values_mut() {
@@ -1136,8 +1169,20 @@ impl Engine {
     }
 
     pub fn set_watched(&self, unit: &str, ok: bool) {
-        if let Some(u) = self.inner.write().unwrap().m.units.get_mut(unit) {
-            u.watched = ok;
+        let lost = {
+            let mut g = self.inner.write().unwrap();
+            match g.m.units.get_mut(unit) {
+                Some(u) => {
+                    let lost = u.watched && !ok;
+                    u.watched = ok;
+                    lost
+                }
+                None => false,
+            }
+        };
+        // A lost watch makes readers' `fresh` unsafe: publish it at once.
+        if lost {
+            self.save_manifest();
         }
     }
 
