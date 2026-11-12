@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use unumsearch::engine::{Engine, SearchOpts};
-use unumsearch::watch::RESCAN_MS;
+use unumsearch::watch::{RESCANS, RESCAN_MS};
 use unumsearch::Config;
 
 fn find(e: &Engine, root: &std::path::Path, pat: &str) -> (usize, bool) {
@@ -73,12 +73,28 @@ fn unit_root_removed_and_created_again_is_watched_again() {
         Duration::from_secs(20),
         || e.rescan_clean(&unit).is_some(),
     );
-    std::fs::write(root.join("c.txt"), "third_marker\n").unwrap();
-    wait_for(
-        "file in the re-created root",
-        Duration::from_secs(5),
-        || find(&e, &root, "third_marker") == (1, true),
-    );
+    // Found through the watch, not by a rescan (they run every 300 ms here):
+    // on Linux at least one of three files must be found with no rescan in
+    // between. Elsewhere the watch is recursive or re-armed by the rescan,
+    // so only the bound is checked.
+    let mut by_watch = false;
+    for i in 0..3 {
+        wait_for("unit never clean", Duration::from_secs(20), || {
+            e.rescan_clean(&unit).is_some()
+        });
+        let marker = format!("later_marker_{i}");
+        let r0 = RESCANS.load(Ordering::Relaxed);
+        std::fs::write(root.join(format!("c{i}.txt")), format!("{marker}\n")).unwrap();
+        wait_for(
+            "file in the re-created root",
+            Duration::from_secs(5),
+            || find(&e, &root, &marker) == (1, true),
+        );
+        by_watch |= RESCANS.load(Ordering::Relaxed) == r0;
+    }
+    if cfg!(target_os = "linux") {
+        assert!(by_watch, "only rescans found files in the re-created root");
+    }
     stop.store(true, Ordering::Relaxed);
     h.join().unwrap();
 }
