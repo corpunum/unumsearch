@@ -35,8 +35,8 @@ Update this file with every change that alters state, open work or how to ship. 
 - **notify 9**: its Windows backend re-arms after an overflow and emits a `Rescan` event (which
   the event loop already maps to `mark_all_dirty`). Once 9.0 is stable (rc.8 on 11-11, MSRV 1.91),
   upgrading may let the per-rescan re-arm go; keep the freshness bound until verified on Windows.
-- Delta shard for a changed file instead of a base rewrite, and the heartbeat out of
-  `manifest.json` (the remaining parts of the hot-directory work; back-off shipped in 0.1.9).
+- Delta shard for a changed file instead of a base rewrite (the remaining part of the
+  hot-directory work; back-off shipped in 0.1.9, the heartbeat file in 0.1.11).
 - crates.io: after each release, `cargo publish` from the shipped commit (the crate records the
   commit it was built from). Check the version numbers first: a version cannot be re-uploaded.
 - `/health` sits behind the same token rule as the other routes when `auth_token` is set.

@@ -831,8 +831,40 @@ impl Engine {
         }
     }
 
+    fn heartbeat_path(&self) -> PathBuf {
+        self.dir.join("heartbeat")
+    }
+
+    /// Writer side: say "still alive" without rewriting the manifest. The
+    /// manifest can be hundreds of KB on large trees, and every rewrite makes
+    /// each reader parse it again; the heartbeat file is a few bytes and
+    /// readers only read it. The manifest keeps `heartbeat_ms` (set at each
+    /// save, and [`Engine::checkpoint`] saves at every rescan) for readers
+    /// from before the heartbeat file.
     pub fn heartbeat(&self) {
+        if !self.writer {
+            return;
+        }
+        let tmp = self.dir.join("heartbeat.tmp");
+        if std::fs::write(&tmp, now_ms().to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, self.heartbeat_path());
+        }
+    }
+
+    /// Save the manifest and beat: once per rescan.
+    pub fn checkpoint(&self) {
         self.save_manifest();
+        self.heartbeat();
+    }
+
+    /// Latest sign of life from the writer: the heartbeat file or, for an
+    /// older writer that has none, the manifest.
+    fn last_beat_ms(&self, m: &Manifest) -> u64 {
+        let file = std::fs::read_to_string(self.heartbeat_path())
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        file.max(m.heartbeat_ms)
     }
 
     fn cleanup_orphans(&self) {
@@ -1741,7 +1773,7 @@ impl Engine {
             return true;
         }
         let window = (m.rescan_secs.max(30) * 2 + 60) * 1000;
-        now_ms().saturating_sub(m.heartbeat_ms) < window
+        now_ms().saturating_sub(self.last_beat_ms(m)) < window
     }
 
     fn statuses(&self, g: &Inner, units: &[String]) -> (Vec<UnitStatus>, bool) {
@@ -2394,7 +2426,7 @@ impl Engine {
             "index_dir": path_str(&self.dir),
             "writer": self.writer,
             "writer_alive": self.writer_alive(&g.m),
-            "heartbeat_ms": g.m.heartbeat_ms,
+            "heartbeat_ms": self.last_beat_ms(&g.m),
             "fresh": fresh,
             "units_total": st.len(),
             "units_ready": ready,

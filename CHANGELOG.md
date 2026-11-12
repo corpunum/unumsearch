@@ -6,6 +6,11 @@
   was always JSON, but agents add the flag out of habit and got "invalid option '--json'": a
   local-model OpenUnum worker following the skill spent its whole budget on that. `--json` after
   `--text` switches back to JSON. The skill now says that no flag is needed.
+- **The writer's heartbeat no longer rewrites `manifest.json`.** The daemon beat every 30 s by
+  rewriting the whole manifest (800 KB on the rig's index), and each CLI or MCP reader then parsed
+  it again. The beat now goes to a separate `heartbeat` file of a few bytes in the index directory;
+  readers take the later of it and the manifest's `heartbeat_ms`. The manifest is still saved at
+  every rescan, so readers from 0.1.10 and older still see the writer alive.
 
 ## v0.1.10 (2026-11-11) - Health and Windows Watches
 

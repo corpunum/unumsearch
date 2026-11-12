@@ -204,7 +204,7 @@ impl<W: Watcher> Ctx<W> {
             }
             self.build(&u);
         }
-        self.engine.heartbeat();
+        self.engine.checkpoint();
         crate::engine::release_memory();
     }
 }
