@@ -40,7 +40,8 @@ unumsearch status
 
 `search` returns `{"ok":true,"result":{...}}` with:
 
-- `matches`: `[{path, line, text}]` (absent with `-l`), `files`: matching files.
+- `matches`: `[{path, line, text}]`, `files`: matching files. With `-l` only
+  `files` is returned (no `matches` key).
 - `backend`: `index`, `scan` (directory not indexed), or `none`.
 - `fresh`: `true` when every covering index unit is up to date. When `false`,
   recent edits may be missing: re-run shortly or use `rg` for that directory.
@@ -51,6 +52,10 @@ unumsearch status
   is already `scan`. For `secret`, do not search them with any tool.
 - `complete`: `covered && fresh && !truncated`; only then is an empty answer
   proof that nothing matches.
+- With `backend: scan`, `complete` is `false` only because the directory is
+  not indexed (`uncovered` reason `not_indexed`). The scan itself read the
+  whole directory under the corpus rules below, so when `truncated` is
+  `false` its answer is exhaustive: no need to re-check it with `rg`.
 
 ## Corpus rules (same as ripgrep)
 
