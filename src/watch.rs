@@ -215,24 +215,38 @@ impl<W: Watcher> Ctx<W> {
     /// does not follow. Drop the watches at and below it, so that the
     /// rebuild this event causes adds them again. (A recursive watch follows
     /// paths below the unit by itself.)
-    fn forget(&mut self, unit: &str, dir: &Path) {
+    fn forget(&mut self, unit: &str, dir: &Path) -> bool {
         if RECURSIVE {
-            return;
+            return false;
         }
         let mut watched = self.engine.watched_dirs.lock().unwrap();
-        // Only this unit's watches: a split root's event must not strip the
-        // watches of its child units, which no rebuild here would restore.
         let gone: Vec<PathBuf> = watched
             .iter()
-            .filter(|d| d.starts_with(dir) && self.engine.unit_of_path(d).as_deref() == Some(unit))
+            .filter(|d| d.starts_with(dir))
             .cloned()
             .collect();
+        // The watches below a renamed directory are gone whichever unit owns
+        // them (nested roots, a split root's child units): those units must
+        // be rebuilt to attach them again.
+        let mut others: HashSet<String> = HashSet::new();
         for d in gone {
             if let Some(w) = self.watcher.as_mut() {
                 let _ = w.unwatch(&d);
             }
             watched.remove(&d);
+            if let Some(o) = self.engine.unit_of_path(&d) {
+                if o != unit {
+                    others.insert(o);
+                }
+            }
         }
+        drop(watched);
+        let any = !others.is_empty();
+        for o in others {
+            self.engine.set_watched(&o, false);
+            self.engine.mark_dirty(&o, Change::Unknown);
+        }
+        any
     }
 
     /// Events were lost, so `watched_dirs` may no longer match the real
@@ -583,8 +597,8 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                         let stale = !RECURSIVE && engine.watched_dirs.lock().unwrap().contains(p);
                         if engine.saturated(&unit) {
                             engine.mark_dirty(&unit, Change::Unknown);
-                            if stale {
-                                ctx.forget(&unit, p);
+                            if stale && ctx.forget(&unit, p) {
+                                changed = true;
                             }
                             continue;
                         }
@@ -595,8 +609,8 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                             engine.mark_dirty(&unit, change);
                             changed = true;
                         }
-                        if stale {
-                            ctx.forget(&unit, p);
+                        if stale && ctx.forget(&unit, p) {
+                            changed = true;
                         }
                     }
                     if changed {
