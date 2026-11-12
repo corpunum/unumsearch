@@ -2,6 +2,28 @@
 
 Update this file with every change that alters state, open work or how to ship. Newest state on top.
 
+## Paused (2026-11-12 17:22 EET until Thu 2026-11-19 10:00 EET, savings mode)
+
+Session s-unumsearch is paused by the owner's savings mode. Where things stand:
+- **Released and live:** v0.1.12 (tag on 32ac242, crates.io, daemon `unumsearch.service` at
+  32ac242; rollback binary `~/.local/bin/unumsearch.bak-0.1.11`). OpenUnum worker proof of
+  0.1.12 passed (U-9cdee445, session 938cad53).
+- **Queued in unumship at pause time:**
+  - c25c39d + 15fdc2e: skill wording (argument order, where errors go), worktree
+    `~/unumsearch-wt-doc`.
+  - c7fc5e7: `drop_all_watches` marks units unwatched BEFORE removing the watches (a status read
+    during the unwatch loop could call a unit fresh; seen in 4 of 5 forced overflows), plus
+    `examples/overflow_bench.rs`; worktree `~/unumsearch-wt-inot`.
+  Once green: these are unreleased; fold them into 0.1.13.
+- **Measured (overflow recovery, live roots minus /data2, 2,117 units, 18,891 watches):** fresh
+  again 10 to 12 s after a forced overflow (initial index 39 s), 12 to 14 CPU-s, linear; no
+  O(n^2). The live daemon has ~90k watches, so expect proportionally longer (not measured).
+- **Unfinished:** per-root exclude-matcher cache (0.8 to 1.0 s of each ~2 s listing pass);
+  a builder's WIP may be in `~/unumsearch-wt-excl` (check `git log` there; the commit is titled
+  "WIP: exclude matcher cache"). Not queued: needs its equivalence test and numbers checked.
+- Leftover worktrees to remove once their commits ship: `~/unumsearch-wt-doc`,
+  `~/unumsearch-wt-inot`, `~/worktrees/unumsearch-showcase` (s-showcase's; its commit shipped).
+
 ## State (2026-11-12, afternoon)
 
 - **v0.1.12** (2026-11-12): two reviews (Opus) of 0.1.11 and the day's watch work found and
