@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.1.11 (2026-11-12) - Quieter Writer
 
 - **`--json` is accepted** (a no-op) by `search`, `files`, `index` and before the command. Output
   was always JSON, but agents add the flag out of habit and got "invalid option '--json'": a

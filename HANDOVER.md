@@ -2,8 +2,12 @@
 
 Update this file with every change that alters state, open work or how to ship. Newest state on top.
 
-## State (2026-11-11, evening)
+## State (2026-11-12, morning)
 
+- **v0.1.11** (2026-11-12): `--json` accepted as a no-op; the writer's 30 s heartbeat writes the
+  small `heartbeat` file in the index dir instead of rewriting `manifest.json` (800 KB on the rig).
+  Readers take the later of the file and the manifest's `heartbeat_ms`; the manifest is still saved
+  at every rescan (`Engine::checkpoint`), so older readers keep seeing the writer alive.
 - **v0.1.10** (2026-11-11): `GET /health` (`ok`, `name`, `version`, `git_sha`, `started_at`) and
   the Windows watcher fix for #7 (every rescan re-adds each unit's watches and re-lists it; a
   watched unit is fresh only if listed within 2x `rescan_secs`). `tests/rearm.rs` forces the

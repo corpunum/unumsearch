@@ -588,7 +588,7 @@ dependencies = [
 
 [[package]]
 name = "unumsearch"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "dirs",
  "globset",
