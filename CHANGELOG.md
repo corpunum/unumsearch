@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Small units are listed on one thread.** Starting the parallel walker's threads cost about
+  2 ms per unit, more than the walk itself for a small unit: on the rig's 2,100 units (2,076 of
+  them under 200 files) a full listing pass took 4.2 to 5.0 s, now 1.9 to 2.1 s. A unit whose
+  previous listing held fewer than 2,000 files is walked serially; the result is identical
+  (`tests/list_equiv.rs` compares both walkers, secrets and excludes included).
+  `examples/list_bench.rs` measures a listing pass over your own index.
 - **Readers see the writer's state changes within a beat again (regression in 0.1.11).** With the
   heartbeat in its own file, state that changed in memory without a build (a flag cleared by a
   rebuild that found nothing new, a watch that could not be added) reached CLI and MCP readers

@@ -8,7 +8,7 @@ use unumsearch::walk;
 
 fn main() {
     let cfg = Config::load_with(None, true).expect("config");
-    let manifest = dirs::cache_dir().unwrap().join("unumsearch/manifest.json");
+    let manifest = cfg.index_dir().join("manifest.json");
     let v: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(manifest).expect("manifest")).unwrap();
     let units: Vec<PathBuf> = v["units"]
