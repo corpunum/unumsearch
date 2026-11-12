@@ -27,7 +27,11 @@ fn heartbeat_keeps_the_manifest_and_readers_see_it() {
     std::fs::write(root.join("a.txt"), "hello\n").unwrap();
     let w = Engine::open(cfg(t.path(), &root), true).unwrap();
     assert!(w.is_writer());
+    // Before the roots were looked at there are no units: that is not fresh
+    // (a daemon answers /status from its first moment).
+    assert_eq!(w.status()["fresh"], false);
     w.index_all(false);
+    assert_eq!(w.status()["units_total"], 1);
     let idx = t.path().join("index");
     let manifest = idx.join("manifest.json");
 

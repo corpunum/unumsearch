@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **`status` is not `fresh` before the daemon has looked at its roots.** In its first moments a
+  daemon has no units yet, and `fresh` over no units was `true`: a client that waited for
+  `/status` to say fresh could search before anything was indexed (it got an honest
+  `fresh: false` result with no files). Found by a CI run where a test did exactly that.
 - **Small units are listed on one thread.** Starting the parallel walker's threads cost about
   2 ms per unit, more than the walk itself for a small unit: on the rig's 2,100 units (2,076 of
   them under 200 files) a full listing pass took 4.2 to 5.0 s, now 1.9 to 2.1 s. A unit whose

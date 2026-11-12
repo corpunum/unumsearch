@@ -2519,6 +2519,9 @@ impl Engine {
         let g = self.inner.read().unwrap();
         let units: Vec<String> = g.m.units.keys().cloned().collect();
         let (st, fresh) = self.statuses(&g, &units);
+        // No units yet although roots are configured (a daemon that has not
+        // looked at its roots so far): nothing is indexed, so not fresh.
+        let fresh = fresh && !(units.is_empty() && !self.cfg.roots.is_empty());
         let disk: u64 = g
             .shards
             .values()
