@@ -253,6 +253,16 @@ impl<W: Watcher> Ctx<W> {
         for u in self.engine.unit_paths() {
             self.engine.set_watched(&u, false);
         }
+        // A split root's watch went with the rest, and the lost events may
+        // include a new child directory: watch the roots again at once and
+        // look for new units.
+        if let Some(w) = self.watcher.as_mut() {
+            for s in self.engine.cfg.split_paths() {
+                let _ = w.unwatch(&s);
+                let _ = w.watch(&s, RecursiveMode::NonRecursive);
+            }
+        }
+        self.engine.need_unit_scan.store(true, Ordering::Relaxed);
     }
 
     fn build(&mut self, unit: &str) {
