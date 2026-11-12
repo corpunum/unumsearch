@@ -1,0 +1,186 @@
+{
+  "name": "unumsearch",
+  "repo": "corpunum/unumsearch",
+  "oneLiner": "A trigram-indexed search engine for code and files that answers like ripgrep, usually in milliseconds, for AI coding agents and humans.",
+  "license": "Apache-2.0",
+  "version": "v0.1.11",
+  "updated": "2026-11-12",
+  "quickstart": {
+    "lang": "bash",
+    "code": "curl -fsSL https://github.com/corpunum/unumsearch/releases/latest/download/install.sh | sh"
+  },
+  "measured": [
+    {
+      "metric": "Whole tree median query time, ripgrep 15.1 (no index)",
+      "value": "347 ms",
+      "sample": "20 regexes from a week of real coding-agent tool calls, 247,535 files, warm page cache, pass repeated 3 times (median repeat shown)",
+      "method": "bench/run_private.sh driving race_bench.py and summarize.py",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md"
+    },
+    {
+      "metric": "Whole tree median query time, unumsearch daemon (HTTP)",
+      "value": "64 ms",
+      "baseline": "ripgrep 15.1: 347 ms",
+      "sample": "20 regexes from a week of real coding-agent tool calls, 247,535 files, warm page cache, pass repeated 3 times (median repeat shown)",
+      "method": "bench/run_private.sh driving race_bench.py and summarize.py",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md"
+    },
+    {
+      "metric": "Whole tree median query time, unumsearch CLI (new process per query)",
+      "value": "91 ms",
+      "baseline": "ripgrep 15.1: 347 ms",
+      "sample": "20 regexes from a week of real coding-agent tool calls, 247,535 files, warm page cache, pass repeated 3 times (median repeat shown)",
+      "method": "bench/run_private.sh driving race_bench.py and summarize.py",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md"
+    },
+    {
+      "metric": "One repository (3.7k files) median query time, ripgrep 15.1 (no index)",
+      "value": "9.8 ms",
+      "sample": "20 regexes from a week of real coding-agent tool calls, warm page cache",
+      "method": "bench/run_private.sh driving race_bench.py and summarize.py",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md"
+    },
+    {
+      "metric": "One repository (3.7k files) median query time, unumsearch daemon (HTTP)",
+      "value": "2.3 ms",
+      "baseline": "ripgrep 15.1: 9.8 ms",
+      "sample": "20 regexes from a week of real coding-agent tool calls, warm page cache",
+      "method": "bench/run_private.sh driving race_bench.py and summarize.py",
+      "date": "2026-10-09",
+      "version": "v0.1.3",
+      "evidence": "docs/BENCHMARKS.md"
+    },
+    {
+      "metric": "One repository (3.7k files) median query time, unumsearch CLI (new process per query)",
+      "value": "12 ms",
+      "baseline": "ripgrep 15.1: 9.8 ms",
+      "sample": "20 regexes from a week of real coding-agent tool calls, warm page cache",
+      "method": "bench/run_private.sh driving race_bench.py and summarize.py",
+      "date": "2026-10-09",
+      "version": "v0.1.3",
+      "evidence": "docs/BENCHMARKS.md"
+    },
+    {
+      "metric": "Race corpus size",
+      "value": "258k files",
+      "sample": "about 180 agent worktrees, warm page cache",
+      "method": "python3 bench/race.py --root .",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md",
+      "version": "v0.1.5"
+    },
+    {
+      "metric": "Race total time, ripgrep",
+      "value": "4.03 s",
+      "sample": "12 search patterns issued by agents, about 180 agent worktrees (258k files), one engine at a time, warm page cache",
+      "method": "python3 bench/race.py --root .",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md",
+      "version": "v0.1.5"
+    },
+    {
+      "metric": "Race total time, unumsearch daemon",
+      "value": "217 ms",
+      "baseline": "ripgrep: 4.03 s",
+      "sample": "12 search patterns issued by agents, about 180 agent worktrees (258k files), one engine at a time, warm page cache; same files as rg 12 of 12",
+      "method": "python3 bench/race.py --root .",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md",
+      "version": "v0.1.5"
+    },
+    {
+      "metric": "Race speed-up over ripgrep",
+      "value": "18.6x",
+      "baseline": "ripgrep: 4.03 s",
+      "sample": "12 search patterns issued by agents, about 180 agent worktrees (258k files), warm page cache",
+      "method": "python3 bench/race.py --root .",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md",
+      "version": "v0.1.5"
+    },
+    {
+      "metric": "Race total time, ugrep",
+      "value": "25.0 s",
+      "baseline": "ripgrep: 4.03 s",
+      "sample": "12 search patterns issued by agents, about 180 agent worktrees (258k files), warm page cache",
+      "method": "python3 bench/race.py --root .",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md",
+      "version": "v0.1.5"
+    },
+    {
+      "metric": "Queries returning exactly rg's files, whole tree",
+      "value": "19 of 20",
+      "sample": "20 regexes, 247,535 files; the 20th differs only by .env.example files that unumsearch never indexes by design",
+      "method": "bench/run_private.sh",
+      "date": "2026-10-09",
+      "evidence": "docs/BENCHMARKS.md"
+    },
+    {
+      "metric": "Index caught up after a checkout rewriting 44,686 Linux kernel files",
+      "value": "7.5 / 6.4 s",
+      "baseline": "v0.1.6: 20.2 / 22.6 s",
+      "sample": "Linux v6.6 to v6.1 and back, shallow clones, warm cache, 12 kernel regexes, one run per pair per version, two directions shown as a / b",
+      "method": "python3 bench/branch_switch.py --repo /tmp/linux --from v6.6 --to v6.1 --queries bench/queries-kernel.json --port 7799",
+      "date": "2026-10-10",
+      "version": "v0.1.7",
+      "evidence": "docs/BENCHMARKS.md"
+    },
+    {
+      "metric": "Fresh and complete answers that differed from ripgrep during branch switches",
+      "value": "0 of 64,454",
+      "sample": "every answer marked fresh and complete after each checkout, compared with rg on the new tree, v0.1.6 and v0.1.7",
+      "method": "python3 bench/branch_switch.py",
+      "date": "2026-10-10",
+      "evidence": "docs/BENCHMARKS.md"
+    }
+  ],
+  "constants": [
+    {
+      "value": "127.0.0.1:7781",
+      "what": "default listen address of unumsearch serve (local HTTP API)"
+    },
+    {
+      "value": "3-letter",
+      "what": "size of the text pieces (trigrams) the index records"
+    },
+    {
+      "value": "1 MB",
+      "what": "file size cap shared with the ripgrep comparison runs"
+    },
+    {
+      "value": "2,000 files",
+      "what": "up to this many changed files the daemon verifies directly so answers stay fresh"
+    }
+  ],
+  "links": [
+    {
+      "label": "Benchmarks",
+      "url": "docs/BENCHMARKS.md"
+    },
+    {
+      "label": "Reference",
+      "url": "docs/REFERENCE.md"
+    },
+    {
+      "label": "Reliability",
+      "url": "RELIABILITY.md"
+    },
+    {
+      "label": "Changelog",
+      "url": "CHANGELOG.md"
+    },
+    {
+      "label": "Integrations",
+      "url": "docs/integrations/README.md"
+    },
+    {
+      "label": "Repository",
+      "url": "https://github.com/corpunum/unumsearch"
+    }
+  ]
+}

@@ -142,6 +142,9 @@ python3 bench/race.py --root . --url http://127.0.0.1:7790   # --queries FILE fo
 time and interleaved per query, with a live timer and bar per engine and a final card: totals,
 speed-up and whether each engine returned the same files as rg. Nothing is replayed; the bars grow
 only while a real process or request runs. `--unumsearch-cli` times one-shot CLI processes
-instead of the daemon. A 12-query run over about 180 agent worktrees on the machine above (warm
-cache): rg 4.0 s, unumsearch 0.22 s, ugrep 25 s; unumsearch returned the same files as rg for 12
-of 12 queries, ugrep for 11 (it has no file-size cap).
+instead of the daemon. A 12-query run over about 180 agent worktrees (258k files) on the machine
+above, warm cache, 2026-10-09, v0.1.5: rg 4.03 s, unumsearch 217 ms (18.6x), ugrep 25.0 s;
+unumsearch returned the same files as rg for 12 of 12 queries, ugrep for 11 (it has no file-size
+cap). The record of that run is its final card, [`media/race-result.png`](media/race-result.png)
+(the README shows it); the terminal output was not saved, so re-run the two commands above for
+numbers on your own tree.
