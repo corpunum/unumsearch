@@ -4,6 +4,14 @@ Update this file with every change that alters state, open work or how to ship. 
 
 ## State (2026-11-12, morning)
 
+- **Unreleased (queued 11-12):** `-h/--help` on every command and `files -m`. Rescan back-off:
+  a clean watched unit is listed every 2nd, then every 4th rescan (`rescan_backoff_max`, default
+  4, 1 = off), and a miss resets every unit; Windows and watcher-less setups are never backed off.
+  Linux now also watches directories that hold no indexed file (the listing hands them to
+  `attach`), which closed the main case only a rescan could catch. Test hooks: `watch::RESCAN_MS`,
+  `RESCANS`, `RESCAN_SKIPS`, `DROP_WATCHES` (drops a watch silently, as a lost watch would).
+  Leftover to triage: `~/.openunum/worktrees/unumsearch-s1` (branch `s1/improve-v0.2.0`, an
+  OpenUnum worker's WIP from 10-09, 3 commits not on main).
 - **v0.1.11** (2026-11-12): `--json` accepted as a no-op; the writer's 30 s heartbeat writes the
   small `heartbeat` file in the index dir instead of rewriting `manifest.json` (800 KB on the rig).
   Readers take the later of the file and the manifest's `heartbeat_ms`; the manifest is still saved
