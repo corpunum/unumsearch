@@ -19,7 +19,10 @@ and filename queries from it. Output is JSON on stdout.
 ## Commands
 
 Output is always JSON (one object on stdout); no flag is needed, and `--json`
-is accepted as a no-op. Pass the directory as the last positional argument.
+is accepted as a no-op. The directory is a positional argument; it may come before or after the
+options. Both kinds of error exit with code 2: an unknown option prints one line on stderr
+(`invalid option ... (see \`unumsearch --help\`)`), a failed search (e.g. a bad regex) prints
+`{"ok":false,"error":"..."}` on stdout.
 
 ```bash
 # Content search: regex by default (ripgrep syntax), -F for a literal string.
