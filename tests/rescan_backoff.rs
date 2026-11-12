@@ -76,15 +76,22 @@ fn clean_watched_unit_is_listed_less_often_until_a_miss() {
         find(&e, &root, "first_marker") == (1, true)
     });
 
-    // Steady state: listed at rescans 1, 3, 7, 11, ... (not at 2, 4-6, 8-10).
+    // Where every rescan re-arms the watches (Windows, #7) nothing is ever
+    // skipped; elsewhere the steady state is listed at rescans 1, 3, 7, 11,
+    // ... (not at 2, 4-6, 8-10).
+    let rearm_os = cfg!(target_os = "windows");
     let (r0, s0) = (rescans(), skips());
     wait_rescans(12);
     let (ran, skipped) = (rescans() - r0, skips() - s0);
-    assert!(
-        skipped * 2 >= ran,
-        "a clean watched unit was listed at {} of {ran} rescans",
-        ran - skipped
-    );
+    if rearm_os {
+        assert_eq!(skipped, 0, "a re-arming rescan skipped a unit");
+    } else {
+        assert!(
+            skipped * 2 >= ran,
+            "a clean watched unit was listed at {} of {ran} rescans",
+            ran - skipped
+        );
+    }
     // A change the watcher sees is not delayed by the back-off.
     std::fs::write(root.join("src/b.txt"), "watched_marker\n").unwrap();
     wait_for("watched change not seen", Duration::from_secs(5), || {
@@ -98,8 +105,15 @@ fn clean_watched_unit_is_listed_less_often_until_a_miss() {
     });
 
     // A change no watch sees (its watch died silently) is found by a listing
-    // within the back-off.
-    DROP_WATCHES.lock().unwrap().push(root.join("lost"));
+    // within the back-off. The watch to drop: the directory's own (Linux
+    // watches each directory) or the unit's recursive one (macOS). Windows
+    // re-arms at every rescan, so there it is only found, nothing is reset.
+    let dropped = if cfg!(target_os = "macos") {
+        root.clone()
+    } else {
+        root.join("lost")
+    };
+    DROP_WATCHES.lock().unwrap().push(dropped);
     wait_for("watch not dropped", Duration::from_secs(5), || {
         DROP_WATCHES.lock().unwrap().is_empty()
     });
@@ -124,6 +138,9 @@ fn clean_watched_unit_is_listed_less_often_until_a_miss() {
         "a miss did not reset the back-off ({} skips in 3 rescans)",
         skips() - s1
     );
+    if rearm_os {
+        assert_eq!(skips(), s0, "a re-arming rescan skipped a unit");
+    }
 
     // Watches re-armed at every rescan (Windows): every unit is listed.
     FORCE_REARM.store(true, Ordering::Relaxed);
