@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Test: a unit's root directory that is removed and created again is watched again (Linux).**
+  `rm -rf repo && git clone ... repo` was checked, since the directory-level fix above did not
+  cover the root itself: the new root is found `fresh: true` and a file created in it afterwards
+  is found through its watch, not by a rescan. It already worked; `tests/root_recreate.rs` pins it.
 - **Linux: a directory that is removed and created again is watched again.** The watch died with
   the old directory, but it stayed on the list of watched directories, so it was never added
   again: files created in the new directory raised no event and the unit stayed `fresh: true`
