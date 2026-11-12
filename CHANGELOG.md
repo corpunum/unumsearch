@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Readers see the writer's state changes within a beat again (regression in 0.1.11).** With the
+  heartbeat in its own file, state that changed in memory without a build (a flag cleared by a
+  rebuild that found nothing new, a watch that could not be added) reached CLI and MCP readers
+  only at the next rescan, up to 5 minutes later; meanwhile a reader could answer `fresh: true`
+  for a unit the daemon no longer trusted. The 30 s beat now saves the manifest when, and only
+  when, its content changed; a lost watch and a mark-all-dirty are saved at once.
+- **Linux: the list of watched directories no longer drifts from the real watches.** After an
+  event-queue overflow (a large branch switch) a directory removed and created again during it
+  stayed unwatched while its unit said `fresh`: every watch is now dropped and added again by
+  the rebuilds an overflow causes, and a unit whose rescan finds a missed change is re-armed.
+  An event on a split root no longer drops the watches of the units below it. A directory that
+  vanishes between the listing and the watch no longer marks its unit unwatched.
 - **Test: a unit's root directory that is removed and created again is watched again (Linux).**
   `rm -rf repo && git clone ... repo` was checked, since the directory-level fix above did not
   cover the root itself: the new root is found `fresh: true` and a file created in it afterwards

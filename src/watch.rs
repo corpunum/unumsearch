@@ -141,7 +141,11 @@ impl<W: Watcher> Ctx<W> {
             }
         }
         drop(watched);
-        self.engine.set_watched(unit, ok);
+        if self.engine.set_watched(unit, ok) {
+            // The unit just lost its watch: readers must not go on answering
+            // `fresh` from the manifest until the next beat.
+            self.engine.publish_state();
+        }
         added
     }
 
@@ -596,6 +600,7 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                 }
                 Ok(Err(_)) => {
                     // Typically a queue overflow: we no longer know what changed.
+                    ctx.drop_all_watches();
                     engine.mark_all_dirty();
                     changed = true;
                     deferred = true;
