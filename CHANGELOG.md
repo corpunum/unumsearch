@@ -12,8 +12,15 @@
   event-queue overflow (a large branch switch) a directory removed and created again during it
   stayed unwatched while its unit said `fresh`: every watch is now dropped and added again by
   the rebuilds an overflow causes, and a unit whose rescan finds a missed change is re-armed.
-  An event on a split root no longer drops the watches of the units below it. A directory that
-  vanishes between the listing and the watch no longer marks its unit unwatched.
+  After an overflow the split roots are watched again at once and new units are looked for (a
+  child directory created during it stayed unknown until the next rescan). A renamed directory
+  drops the watches below it whichever unit owns them (nested roots, a split root's child
+  units), and those units are rebuilt to add them again. A subdirectory that vanishes between
+  the listing and the watch no longer marks its unit unwatched; a unit whose root is gone is
+  unwatched and not `fresh`. (`tests/watch_drift.rs`, `overflow_unit_scan.rs`, `root_gone.rs`,
+  `nested_roots.rs`, `root_recreate.rs`, `split_root_recreate.rs`.)
+- Manifest saves are serialized and a failed save is retried by the next beat; on macOS a daemon
+  start no longer saves the manifest once per unit.
 - **Test: a unit's root directory that is removed and created again is watched again (Linux).**
   `rm -rf repo && git clone ... repo` was checked, since the directory-level fix above did not
   cover the root itself: the new root is found `fresh: true` and a file created in it afterwards
