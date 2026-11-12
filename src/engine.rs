@@ -1143,7 +1143,7 @@ impl Engine {
         self.save_manifest();
     }
 
-    fn mark_all_dirty_mem(&self) {
+    pub(crate) fn mark_all_dirty_mem(&self) {
         let mut g = self.inner.write().unwrap();
         let t = now_ms();
         for u in g.m.units.values_mut() {

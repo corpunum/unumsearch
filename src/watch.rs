@@ -114,8 +114,9 @@ impl<W: Watcher> Ctx<W> {
                     added += 1;
                     if STREAM_RESTARTS {
                         // The restart may have dropped other units' events.
-                        // (This unit is listed again by `build`.)
-                        self.engine.mark_all_dirty();
+                        // (This unit is listed again by `build`; the builds
+                        // and the rescan's checkpoint publish the state.)
+                        self.engine.mark_all_dirty_mem();
                     }
                 }
             }
@@ -181,7 +182,7 @@ impl<W: Watcher> Ctx<W> {
         }
         drop(watched);
         if restarted {
-            self.engine.mark_all_dirty();
+            self.engine.mark_all_dirty_mem();
         }
     }
 
