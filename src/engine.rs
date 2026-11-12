@@ -1265,6 +1265,7 @@ impl Engine {
         let _guard = self.build_lock.lock().unwrap();
         let prev_fp;
         let prev_shards;
+        let prev_files;
         let pending_at_start: std::collections::BTreeSet<String>;
         let (dirty_age_ms, quiet_ms);
         let hot_window;
@@ -1288,6 +1289,8 @@ impl Engine {
             };
             quiet_ms = now_ms().saturating_sub(u.last_event_ms);
             prev_shards = u.shards.clone();
+            // Size hint for the listing; 0 means never built (size unknown).
+            prev_files = (u.files > 0).then_some(u.files);
             pending_at_start = u.pending.clone();
             hot_window = self.min_rebuild_interval_ms(u);
         }
@@ -1333,14 +1336,14 @@ impl Engine {
             drop(g);
             walk::list_depth(&self.cfg, &root, Some(1))
         } else if self.writer && self.cfg.watch && !crate::watch::RECURSIVE {
-            let (files, dirs) = walk::list_full(&self.cfg, &root, None, true);
+            let (files, dirs) = walk::list_full_hinted(&self.cfg, &root, None, true, prev_files);
             self.listed_dirs
                 .lock()
                 .unwrap()
                 .insert(unit.to_string(), dirs);
             files
         } else {
-            walk::list(&self.cfg, &root)
+            walk::list_full_hinted(&self.cfg, &root, None, false, prev_files).0
         };
         let t_list = t0.elapsed();
         let stall = self.build_stall_ms.load(Ordering::Relaxed);

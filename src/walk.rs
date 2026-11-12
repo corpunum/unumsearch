@@ -100,6 +100,39 @@ pub fn list_full(
     max_depth: Option<usize>,
     with_dirs: bool,
 ) -> (Vec<FileEntry>, Vec<PathBuf>) {
+    list_full_hinted(cfg, root, max_depth, with_dirs, None)
+}
+
+/// Units whose previous listing held fewer files than this are walked on the
+/// calling thread: starting walker threads costs more than the walk itself.
+pub const SERIAL_BELOW: usize = 2000;
+
+/// [`list_full`] with a hint: the file count of the unit's previous listing.
+/// A small previous listing (`< SERIAL_BELOW`) selects the serial walker;
+/// the result is the same either way.
+pub fn list_full_hinted(
+    cfg: &Config,
+    root: &Path,
+    max_depth: Option<usize>,
+    with_dirs: bool,
+    prev_files: Option<usize>,
+) -> (Vec<FileEntry>, Vec<PathBuf>) {
+    list_impl(
+        cfg,
+        root,
+        max_depth,
+        with_dirs,
+        prev_files.is_some_and(|n| n < SERIAL_BELOW),
+    )
+}
+
+fn list_impl(
+    cfg: &Config,
+    root: &Path,
+    max_depth: Option<usize>,
+    with_dirs: bool,
+    serial: bool,
+) -> (Vec<FileEntry>, Vec<PathBuf>) {
     let excl = exclude_matcher(cfg, root);
     let mut wb = WalkBuilder::new(root);
     wb.max_depth(max_depth);
@@ -114,37 +147,80 @@ pub fn list_full(
         .threads(cfg.thread_count().min(4));
     let root_owned: PathBuf = root.to_path_buf();
     let excl = std::sync::Arc::new(excl);
+    let file_excl = excl.clone();
     wb.filter_entry(move |e| {
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
         // The walk prunes top-down, so the entry itself is all we must check.
         e.path() == root_owned || !excl.matched(e.path(), is_dir).is_ignore()
     });
-    let out: Mutex<Vec<FileEntry>> = Mutex::new(Vec::new());
-    let dirs: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-    wb.build_parallel().run(|| {
-        let (out, dirs) = (&out, &dirs);
-        Box::new(move |res| {
-            if let Ok(e) = res {
-                if with_dirs && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    dirs.lock().unwrap().push(e.path().to_path_buf());
-                } else if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                    if let Ok(md) = e.metadata() {
-                        if let Some(rel) = rel_string(root, e.path()) {
-                            out.lock().unwrap().push(FileEntry {
-                                rel,
-                                size: md.len(),
-                                mtime_ns: stamp_ns(&md),
-                            });
-                        }
+    let visit = |e: &ignore::DirEntry| -> (Option<FileEntry>, Option<PathBuf>) {
+        if with_dirs && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            (None, Some(e.path().to_path_buf()))
+        } else if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            let fe = e.metadata().ok().and_then(|md| {
+                rel_string(root, e.path()).map(|rel| FileEntry {
+                    rel,
+                    size: md.len(),
+                    mtime_ns: stamp_ns(&md),
+                })
+            });
+            (fe, None)
+        } else {
+            (None, None)
+        }
+    };
+    let (mut v, d) = if serial {
+        let (mut v, mut d) = (Vec::new(), Vec::new());
+        for e in wb.build().flatten() {
+            // The serial walker skips `filter_entry` for a file once the size
+            // cap passes it (ignore's `Walk::skip_entry` returns early), so
+            // the excludes (secrets among them) are applied here again.
+            if e.file_type().is_some_and(|t| !t.is_dir())
+                && e.depth() > 0
+                && file_excl.matched(e.path(), false).is_ignore()
+            {
+                continue;
+            }
+            let (f, p) = visit(&e);
+            v.extend(f);
+            d.extend(p);
+        }
+        (v, d)
+    } else {
+        let out: Mutex<Vec<FileEntry>> = Mutex::new(Vec::new());
+        let dirs: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+        wb.build_parallel().run(|| {
+            let (out, dirs, visit) = (&out, &dirs, &visit);
+            Box::new(move |res| {
+                if let Ok(e) = res {
+                    let (f, p) = visit(&e);
+                    if let Some(f) = f {
+                        out.lock().unwrap().push(f);
+                    }
+                    if let Some(p) = p {
+                        dirs.lock().unwrap().push(p);
                     }
                 }
-            }
-            ignore::WalkState::Continue
-        })
-    });
-    let mut v = out.into_inner().unwrap();
+                ignore::WalkState::Continue
+            })
+        });
+        (out.into_inner().unwrap(), dirs.into_inner().unwrap())
+    };
     v.sort_by(|a, b| a.rel.cmp(&b.rel));
-    (v, dirs.into_inner().unwrap())
+    (v, d)
+}
+
+/// Test/bench hook: [`list_full`] forced onto the serial (`true`) or the
+/// parallel (`false`) walker.
+#[doc(hidden)]
+pub fn list_full_forced(
+    cfg: &Config,
+    root: &Path,
+    max_depth: Option<usize>,
+    with_dirs: bool,
+    serial: bool,
+) -> (Vec<FileEntry>, Vec<PathBuf>) {
+    list_impl(cfg, root, max_depth, with_dirs, serial)
 }
 
 /// Does the corpus walk of `unit` reach `target` (a path below `unit`)? It
