@@ -132,9 +132,11 @@ impl<W: Watcher> Ctx<W> {
                 if w.watch(&d, RecursiveMode::NonRecursive).is_ok() {
                     watched.insert(d);
                     added += 1;
-                } else if !d.exists() {
-                    // Removed between the listing and now: nothing to watch;
-                    // its parent's watch reports a re-creation.
+                } else if d != unit_p && !d.exists() {
+                    // A subdirectory removed between the listing and now:
+                    // nothing to watch; its parent's watch reports a
+                    // re-creation. (Nothing watches a unit root's parent, so
+                    // a missing root is a failed watch.)
                 } else {
                     ok = false;
                 }
