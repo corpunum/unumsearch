@@ -18,9 +18,15 @@ Session s-unumsearch is paused by the owner's savings mode. Where things stand:
 - **Measured (overflow recovery, live roots minus /data2, 2,117 units, 18,891 watches):** fresh
   again 10 to 12 s after a forced overflow (initial index 39 s), 12 to 14 CPU-s, linear; no
   O(n^2). The live daemon has ~90k watches, so expect proportionally longer (not measured).
-- **Unfinished:** per-root exclude-matcher cache (0.8 to 1.0 s of each ~2 s listing pass);
-  a builder's WIP may be in `~/unumsearch-wt-excl` (check `git log` there; the commit is titled
-  "WIP: exclude matcher cache"). Not queued: needs its equivalence test and numbers checked.
+- **Unfinished: exclude-matcher sharing,** WIP commit 9a94639 in `~/unumsearch-wt-excl` (not
+  queued). Design: one compiled pattern set shared by all units; each unit's `ExcludeMatcher`
+  holds only its root and matches paths relative to it (the `ignore` crate uses a matcher's root
+  only to strip it). Builder's numbers: small-unit listing 1.75-2.48 s -> 0.58-0.87 s per pass,
+  RSS unchanged (a per-root cache was rejected: ~150 KB per matcher, ~320 MB for 2,118 units).
+  `tests/list_equiv.rs` `cached_matcher_equals_uncached_per_root` passes. Still to do on resume:
+  clippy, `cargo check --tests --examples` for windows-msvc and aarch64-apple-darwin, a review
+  that paths outside the matcher's root behave as before (`reaches` matches the root itself),
+  the full gate under a lease, then queue with `--chain tip`.
 - Leftover worktrees to remove once their commits ship: `~/unumsearch-wt-doc`,
   `~/unumsearch-wt-inot`, `~/worktrees/unumsearch-showcase` (s-showcase's; its commit shipped).
 
