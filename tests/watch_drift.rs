@@ -2,7 +2,9 @@
 //! The watched-directory record must not drift from the real watches while a
 //! unit answers `fresh: true`. Rescans are effectively off (rescan_secs 3600),
 //! so only a live watch can find a new file. The tests share process-global
-//! hooks, hence one #[test].
+//! hooks, hence one #[test]. Linux only: the record exists only where each
+//! directory has its own watch (elsewhere one recursive watch per unit).
+#![cfg(target_os = "linux")]
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};

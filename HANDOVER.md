@@ -33,6 +33,11 @@ Update this file with every change that alters state, open work or how to ship. 
 
 1. Detached worktree of `origin/main`, change, then the gates:
    `cargo fmt --all -- --check && cargo clippy --all-targets -- -D warnings && cargo test --all-targets`.
+   Also compile the tests for the other OSes before queuing (the targets are installed on the
+   rig; a check needs no linker): `cargo check --tests --target x86_64-pc-windows-msvc` and
+   `--target aarch64-apple-darwin`. Twice on 11-12 main went red on Windows only: a test that
+   assumed Linux behaviour, then a test using `std::os::unix`. Full suites and builds run under
+   `~/UnumOrchestrator/scripts/lease.sh run heavy-cpu -- <cmd>`.
 2. One push to `main`; wait for CI to end green.
 3. Release: bump `Cargo.toml` + `CHANGELOG.md`, tag `vX.Y.Z`, push the tag (`release.yml` builds
    the binaries). Tag by hand only a commit unumship has already shipped green (its rebased sha on
