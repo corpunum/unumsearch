@@ -74,6 +74,20 @@ fn file_created_in_a_dir_without_indexed_files_is_seen() {
         });
         settle(rel);
     }
+    // A watched directory that is removed and created again is a new
+    // directory: its old watch died with it, so it must be watched anew.
+    std::fs::remove_dir_all(root.join("src")).unwrap();
+    wait_for("removal not seen", Duration::from_secs(5), || {
+        find(&e, &root, "first_marker") == (0, true)
+    });
+    settle("after removal");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::thread::sleep(Duration::from_millis(500));
+    settle("after re-creation");
+    std::fs::write(root.join("src/again.txt"), "recreated_marker\n").unwrap();
+    wait_for("file in a re-created dir", Duration::from_secs(5), || {
+        find(&e, &root, "recreated_marker") == (1, true)
+    });
     stop.store(true, Ordering::Relaxed);
     h.join().unwrap();
 }

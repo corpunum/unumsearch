@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Linux: a directory that is removed and created again is watched again.** The watch died with
+  the old directory, but it stayed on the list of watched directories, so it was never added
+  again: files created in the new directory raised no event and the unit stayed `fresh: true`
+  without them until a rescan found them (`rm -rf build && mkdir build`, a branch switch that
+  drops and restores a directory). An event that names a watched directory now drops the
+  watches at and below it, and the rebuild that follows adds them again. In every release so far.
 - **Every command takes `-h`/`--help`**, and an option a command does not take now says
   `(see unumsearch --help)`. `files` accepts `-m N` (and `--max-files N`) for its cap, like
   `search -m`. Agents try these first; before, each was an "invalid option" error.

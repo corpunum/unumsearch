@@ -197,6 +197,29 @@ impl<W: Watcher> Ctx<W> {
         self.engine.set_watched(unit, false);
     }
 
+    /// An event named a directory we watch: it was removed, renamed or
+    /// replaced, and a re-created directory is a new one that the old watch
+    /// does not follow. Drop the watches at and below it, so that the
+    /// rebuild this event causes adds them again. (A recursive watch follows
+    /// paths below the unit by itself.)
+    fn forget(&mut self, dir: &Path) {
+        if RECURSIVE {
+            return;
+        }
+        let mut watched = self.engine.watched_dirs.lock().unwrap();
+        let gone: Vec<PathBuf> = watched
+            .iter()
+            .filter(|d| d.starts_with(dir))
+            .cloned()
+            .collect();
+        for d in gone {
+            if let Some(w) = self.watcher.as_mut() {
+                let _ = w.unwatch(&d);
+            }
+            watched.remove(&d);
+        }
+    }
+
     fn build(&mut self, unit: &str) {
         // Changes made between a listing and the watches that cover them
         // would be missed until the next rescan, so after adding watches
@@ -501,8 +524,12 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                         // moves. Working out each of tens of thousands of
                         // events (directory listings for new files) delayed
                         // the rebuild by seconds.
+                        let stale = !RECURSIVE && engine.watched_dirs.lock().unwrap().contains(p);
                         if engine.saturated(&unit) {
                             engine.mark_dirty(&unit, Change::Unknown);
+                            if stale {
+                                ctx.forget(p);
+                            }
                             continue;
                         }
                         if let Some(change) = relevant(&engine, &unit, p, &mut listings) {
@@ -511,6 +538,9 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
                             }
                             engine.mark_dirty(&unit, change);
                             changed = true;
+                        }
+                        if stale {
+                            ctx.forget(p);
                         }
                     }
                     if changed {
