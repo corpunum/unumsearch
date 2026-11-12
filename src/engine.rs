@@ -828,10 +828,24 @@ impl Engine {
         }
         let bytes = {
             let mut g = self.inner.write().unwrap();
-            let h = self.content_hash(&mut g.m);
+            let (h, zeroed) = self.content_hash(&mut g.m);
             self.saved_hash.store(h, Ordering::Relaxed);
             g.m.heartbeat_ms = now_ms();
-            serde_json::to_vec(&g.m).unwrap_or_default()
+            // One serialization per save: put the beat into the bytes that
+            // were hashed (the field comes before any unit data).
+            const ZERO: &[u8] = b"\"heartbeat_ms\":0,";
+            match zeroed.windows(ZERO.len()).position(|w| w == ZERO) {
+                Some(at) => {
+                    let mut out = Vec::with_capacity(zeroed.len() + 16);
+                    out.extend_from_slice(&zeroed[..at]);
+                    out.extend_from_slice(
+                        format!("\"heartbeat_ms\":{},", g.m.heartbeat_ms).as_bytes(),
+                    );
+                    out.extend_from_slice(&zeroed[at + ZERO.len()..]);
+                    out
+                }
+                None => serde_json::to_vec(&g.m).unwrap_or_default(),
+            }
         };
         let tmp = self.dir.join("manifest.json.tmp");
         if std::fs::write(&tmp, bytes).is_ok() {
@@ -840,7 +854,7 @@ impl Engine {
     }
 
     /// Hash of what a save would write, apart from the beat time.
-    fn content_hash(&self, m: &mut Manifest) -> u64 {
+    fn content_hash(&self, m: &mut Manifest) -> (u64, Vec<u8>) {
         use std::hash::{Hash, Hasher};
         m.version = 1;
         m.rescan_secs = self.cfg.rescan_secs;
@@ -849,7 +863,7 @@ impl Engine {
         m.heartbeat_ms = beat;
         let mut h = std::collections::hash_map::DefaultHasher::new();
         bytes.hash(&mut h);
-        h.finish()
+        (h.finish(), bytes)
     }
 
     fn heartbeat_path(&self) -> PathBuf {
@@ -880,7 +894,7 @@ impl Engine {
         // readers within a beat; an unchanged manifest is not rewritten.
         let h = {
             let mut g = self.inner.write().unwrap();
-            self.content_hash(&mut g.m)
+            self.content_hash(&mut g.m).0
         };
         if h != self.saved_hash.load(Ordering::Relaxed) {
             self.save_manifest();
@@ -1168,21 +1182,19 @@ impl Engine {
         clean.then_some(u.last_build_ms)
     }
 
-    pub fn set_watched(&self, unit: &str, ok: bool) {
-        let lost = {
-            let mut g = self.inner.write().unwrap();
-            match g.m.units.get_mut(unit) {
-                Some(u) => {
-                    let lost = u.watched && !ok;
-                    u.watched = ok;
-                    lost
-                }
-                None => false,
+    /// Returns whether the unit just lost its watch (was watched, is not).
+    pub fn set_watched(&self, unit: &str, ok: bool) -> bool {
+        // Readers see this at the next save: a build's, or the next beat
+        // (`heartbeat` saves when the manifest changed). Not saved here: a
+        // re-arm clears and sets the flag for every unit at each rescan; the
+        // caller publishes a real loss.
+        match self.inner.write().unwrap().m.units.get_mut(unit) {
+            Some(u) => {
+                let lost = u.watched && !ok;
+                u.watched = ok;
+                lost
             }
-        };
-        // A lost watch makes readers' `fresh` unsafe: publish it at once.
-        if lost {
-            self.save_manifest();
+            None => false,
         }
     }
 
