@@ -163,6 +163,9 @@ pub struct Engine {
     manifest_stamp: Mutex<Option<(SystemTime, u64, u64)>>,
     pub(crate) watched_dirs: Mutex<HashSet<PathBuf>>,
     pub(crate) need_unit_scan: AtomicBool,
+    /// Directories each unit's last listing entered, for the watcher to take
+    /// ([`Engine::take_listed_dirs`]). Kept only while watching.
+    listed_dirs: Mutex<HashMap<String, Vec<PathBuf>>>,
     doc_sets: Mutex<HashMap<String, Arc<Vec<u64>>>>,
     /// Last shard generation handed out (strictly increasing).
     last_gen: AtomicU64,
@@ -615,6 +618,7 @@ impl Engine {
             manifest_stamp: Mutex::new(None),
             watched_dirs: Mutex::new(HashSet::new()),
             need_unit_scan: AtomicBool::new(false),
+            listed_dirs: Mutex::new(HashMap::new()),
             doc_sets: Mutex::new(HashMap::new()),
             last_gen: AtomicU64::new(now_ms()),
             build_stall_ms: AtomicU64::new(0),
@@ -841,6 +845,15 @@ impl Engine {
     /// readers only read it. The manifest keeps `heartbeat_ms` (set at each
     /// save, and [`Engine::checkpoint`] saves at every rescan) for readers
     /// from before the heartbeat file.
+    /// The directories `unit`'s last listing entered (see `listed_dirs`).
+    pub(crate) fn take_listed_dirs(&self, unit: &str) -> Vec<PathBuf> {
+        self.listed_dirs
+            .lock()
+            .unwrap()
+            .remove(unit)
+            .unwrap_or_default()
+    }
+
     pub fn heartbeat(&self) {
         if !self.writer {
             return;
@@ -1253,6 +1266,13 @@ impl Engine {
             }
             drop(g);
             walk::list_depth(&self.cfg, &root, Some(1))
+        } else if self.writer && self.cfg.watch && !crate::watch::RECURSIVE {
+            let (files, dirs) = walk::list_full(&self.cfg, &root, None, true);
+            self.listed_dirs
+                .lock()
+                .unwrap()
+                .insert(unit.to_string(), dirs);
+            files
         } else {
             walk::list(&self.cfg, &root)
         };

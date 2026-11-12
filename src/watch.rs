@@ -24,7 +24,7 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const RECURSIVE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
+pub(crate) const RECURSIVE: bool = cfg!(any(target_os = "macos", target_os = "windows"));
 
 /// notify's FSEvents backend runs one stream for all watched paths and
 /// restarts it on every `watch`/`unwatch`, from "now": events that happen
@@ -58,6 +58,10 @@ pub static RESCAN_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU6
 pub static RESCANS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[doc(hidden)]
 pub static RESCAN_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Test hook: directories whose watch the watcher loop drops silently (still
+/// counted as watched), as a lost watch would be.
+#[doc(hidden)]
+pub static DROP_WATCHES: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
 
 /// Per-unit rescan back-off: `clean` re-listings in a row that found nothing
 /// the watcher had missed, and rescans skipped since the last listing.
@@ -90,6 +94,7 @@ struct Ctx<W: Watcher> {
 impl<W: Watcher> Ctx<W> {
     /// Watch the unit's directories; returns how many watches were added.
     fn attach(&mut self, unit: &str, files: &[FileEntry]) -> usize {
+        let listed = self.engine.take_listed_dirs(unit);
         let Some(w) = self.watcher.as_mut() else {
             return 0;
         };
@@ -111,7 +116,12 @@ impl<W: Watcher> Ctx<W> {
                 }
             }
         } else {
-            for d in dirs_for(&unit_p, files) {
+            // Every directory the listing entered, not only those holding an
+            // indexed file: a file created in an empty (or all-ignored)
+            // directory must raise an event too.
+            let mut dirs = dirs_for(&unit_p, files);
+            dirs.extend(listed.into_iter().filter(|d| d.starts_with(&unit_p)));
+            for d in dirs {
                 if watched.contains(&d) {
                     continue;
                 }
@@ -432,6 +442,11 @@ pub fn run(engine: Arc<Engine>, stop: Arc<AtomicBool>) {
     let mut changed = false;
 
     while !stop.load(Ordering::Relaxed) {
+        for d in std::mem::take(&mut *DROP_WATCHES.lock().unwrap()) {
+            if let Some(w) = ctx.watcher.as_mut() {
+                let _ = w.unwatch(&d);
+            }
+        }
         let stall = STALL_LOOP_MS.load(Ordering::Relaxed);
         if stall > 0 {
             std::thread::sleep(Duration::from_millis(stall));

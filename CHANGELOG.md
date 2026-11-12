@@ -5,6 +5,11 @@
 - **Every command takes `-h`/`--help`**, and an option a command does not take now says
   `(see unumsearch --help)`. `files` accepts `-m N` (and `--max-files N`) for its cap, like
   `search -m`. Agents try these first; before, each was an "invalid option" error.
+- **Linux: directories without an indexed file are watched too.** Watches were placed only on
+  directories that held an indexed file, so a file created in an empty directory (or one holding
+  only ignored files) raised no event: the unit stayed `fresh: true` without it until the next
+  rescan, up to 5 minutes. The listing now hands the watcher every directory it entered.
+  (`tests/empty_dir_watch.rs`; macOS and Windows watch recursively and were not affected.)
 - **Rescans back off for watched units that stay clean.** The periodic rescan listed every unit
   every `rescan_secs`: on the rig 2,100 units and 393k files, 5 to 18 s of listing (one 270k-file
   unit 0.75 to 2.3 s warm, 7 s cold) every 5 minutes; the fingerprint is about 0.1 s of it. A

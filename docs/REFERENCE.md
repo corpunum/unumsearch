@@ -294,9 +294,9 @@ request surface every front-end uses.
   dirty. Changed files are searched directly until the unit's rebuild (debounced) replaces its
   shards; directory moves and ignore-file edits mark the unit not fresh until then.
 - **Rescans**: every `rescan_secs` (300) the daemon lists units again and rebuilds any whose
-  listing moved. That catches what no watch reports: a file created in a directory that held no
-  indexed file (it has no watch), ignore files above a unit, changes made by another host on a
-  network filesystem. A watched unit that is clean and whose listings keep matching its index is
+  listing moved. That catches what no watch reports: ignore files above a unit, changes made by another host
+  on a network filesystem, a watch lost without notice. (Every directory the listing enters is
+  watched, including those that hold no indexed file yet.) A watched unit that is clean and whose listings keep matching its index is
   listed at a growing interval: every 2nd, then every 4th rescan (`rescan_backoff_max`, 1 = every
   rescan), so at most 20 minutes apart by default. A rescan that finds a change the watcher
   missed, in any unit, puts every unit back to every rescan. Units without a working watch, a

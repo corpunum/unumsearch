@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The periodic rescan backs off for a watched unit that stays clean: it is
 //! re-listed every 2nd, then every 4th rescan (`rescan_backoff_max`), not at
-//! every one. A rescan that finds a change the watcher missed (here a file
-//! created in a directory that holds no indexed file, so has no watch) puts
-//! every unit back to every rescan. Where watches are re-armed at each
+//! every one. A rescan that finds a change the watcher
+//! missed (here: a watch dropped silently) puts every unit back to every
+//! rescan. Where watches are re-armed at each
 //! rescan (Windows, forced here) nothing is skipped. Its own process: the
 //! hooks are global.
 
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use unumsearch::engine::{Engine, SearchOpts};
-use unumsearch::watch::{FORCE_REARM, REARMS, RESCANS, RESCAN_MS, RESCAN_SKIPS};
+use unumsearch::watch::{DROP_WATCHES, FORCE_REARM, REARMS, RESCANS, RESCAN_MS, RESCAN_SKIPS};
 use unumsearch::Config;
 
 fn find(e: &Engine, root: &std::path::Path, pat: &str) -> (usize, bool) {
@@ -56,8 +56,7 @@ fn clean_watched_unit_is_listed_less_often_until_a_miss() {
     let root = t.path().join("repo");
     std::fs::create_dir_all(root.join(".git")).unwrap();
     std::fs::create_dir_all(root.join("src")).unwrap();
-    // No indexed file inside: the directory gets no watch.
-    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::create_dir_all(root.join("lost")).unwrap();
     std::fs::write(root.join("src/a.txt"), "first_marker\n").unwrap();
     let cfg = Config {
         roots: vec![root.to_string_lossy().into_owned()],
@@ -98,9 +97,14 @@ fn clean_watched_unit_is_listed_less_often_until_a_miss() {
         e.rescan_clean(&unit).is_some()
     });
 
-    // A change no watch sees is found by a listing within the back-off.
+    // A change no watch sees (its watch died silently) is found by a listing
+    // within the back-off.
+    DROP_WATCHES.lock().unwrap().push(root.join("lost"));
+    wait_for("watch not dropped", Duration::from_secs(5), || {
+        DROP_WATCHES.lock().unwrap().is_empty()
+    });
     let r1 = rescans();
-    std::fs::write(root.join("docs/hole.txt"), "hole_marker\n").unwrap();
+    std::fs::write(root.join("lost/hole.txt"), "hole_marker\n").unwrap();
     wait_for(
         "missed change never listed",
         Duration::from_secs(20),

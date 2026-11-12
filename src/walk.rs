@@ -88,6 +88,18 @@ pub fn list(cfg: &Config, root: &Path) -> Vec<FileEntry> {
 /// [`list`], descending at most `max_depth` levels (`Some(1)`: only the
 /// files directly inside `root`).
 pub fn list_depth(cfg: &Config, root: &Path, max_depth: Option<usize>) -> Vec<FileEntry> {
+    list_full(cfg, root, max_depth, false).0
+}
+
+/// [`list_depth`], plus (when `with_dirs`) every directory the walk entered,
+/// `root` included, unsorted. A watcher needs those: a directory that holds
+/// no corpus file yet is still where the next one may appear.
+pub fn list_full(
+    cfg: &Config,
+    root: &Path,
+    max_depth: Option<usize>,
+    with_dirs: bool,
+) -> (Vec<FileEntry>, Vec<PathBuf>) {
     let excl = exclude_matcher(cfg, root);
     let mut wb = WalkBuilder::new(root);
     wb.max_depth(max_depth);
@@ -108,11 +120,14 @@ pub fn list_depth(cfg: &Config, root: &Path, max_depth: Option<usize>) -> Vec<Fi
         e.path() == root_owned || !excl.matched(e.path(), is_dir).is_ignore()
     });
     let out: Mutex<Vec<FileEntry>> = Mutex::new(Vec::new());
+    let dirs: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
     wb.build_parallel().run(|| {
-        let out = &out;
+        let (out, dirs) = (&out, &dirs);
         Box::new(move |res| {
             if let Ok(e) = res {
-                if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                if with_dirs && e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    dirs.lock().unwrap().push(e.path().to_path_buf());
+                } else if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
                     if let Ok(md) = e.metadata() {
                         if let Some(rel) = rel_string(root, e.path()) {
                             out.lock().unwrap().push(FileEntry {
@@ -129,7 +144,7 @@ pub fn list_depth(cfg: &Config, root: &Path, max_depth: Option<usize>) -> Vec<Fi
     });
     let mut v = out.into_inner().unwrap();
     v.sort_by(|a, b| a.rel.cmp(&b.rel));
-    v
+    (v, dirs.into_inner().unwrap())
 }
 
 /// Does the corpus walk of `unit` reach `target` (a path below `unit`)? It
