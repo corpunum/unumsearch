@@ -74,6 +74,12 @@
       "version": "v0.1.5"
     },
     {
+      "metric": "Race corpus size rounded for the hero picture",
+      "value": "258,000 files",
+      "method": "python3 bench/race.py --root .",
+      "date": "2026-10-09"
+    },
+    {
       "metric": "Race total time, ripgrep",
       "value": "4.03 s",
       "sample": "12 search patterns issued by agents, about 180 agent worktrees (258k files), one engine at a time, warm page cache",
@@ -81,6 +87,12 @@
       "date": "2026-10-09",
       "evidence": "docs/BENCHMARKS.md",
       "version": "v0.1.5"
+    },
+    {
+      "metric": "Race total time, ripgrep rounded for the hero picture",
+      "value": "4.0 s",
+      "method": "python3 bench/race.py --root .",
+      "date": "2026-10-09"
     },
     {
       "metric": "Race total time, unumsearch daemon",
@@ -91,6 +103,12 @@
       "date": "2026-10-09",
       "evidence": "docs/BENCHMARKS.md",
       "version": "v0.1.5"
+    },
+    {
+      "metric": "Race total time, unumsearch daemon rounded for the hero picture",
+      "value": "0.22 s",
+      "method": "python3 bench/race.py --root .",
+      "date": "2026-10-09"
     },
     {
       "metric": "Race speed-up over ripgrep",
