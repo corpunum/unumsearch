@@ -131,6 +131,17 @@
       "evidence": "docs/BENCHMARKS.md"
     },
     {
+      "metric": "Index caught up after a checkout rewriting 44,686 Linux kernel files",
+      "value": "12.4 / 12.6 s",
+      "baseline": "v0.1.7: 7.5 / 6.4 s (2026-10-10)",
+      "sample": "Linux v6.6 to v6.1 and back, shallow clones, warm cache, 12 kernel regexes, one run per direction, two directions shown as a / b; 0 wrong of 1,508 fresh and complete answers checked against rg",
+      "method": "python3 bench/branch_switch.py --repo /tmp/linux --from v6.6 --to v6.1 --queries bench/queries-kernel.json --port 7799 (field rebuild_window_s, run under lease heavy-cpu)",
+      "note": "Measured on a busy machine (other jobs held CPU leases) on 2026-11-13; not the norm, do not present as typical",
+      "date": "2026-11-13",
+      "version": "v0.1.12",
+      "evidence": "docs/BENCHMARKS.md"
+    },
+    {
       "metric": "Fresh and complete answers that differed from ripgrep during branch switches",
       "value": "0 of 64,454",
       "sample": "every answer marked fresh and complete after each checkout, compared with rg on the new tree, v0.1.6 and v0.1.7",

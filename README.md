@@ -63,7 +63,7 @@ your own code with `python3 bench/race.py --root .` ([see it yourself](docs/BENC
 - **Same answers.** 19 of 20 queries returned exactly rg's files over the whole tree; the 20th
   differs only by `.env.example` files, which unumsearch never indexes on purpose.
 - **Branch switches.** When `git checkout` rewrites 44,686 Linux kernel files, the index has caught
-  up 6.4 to 7.5 s after the checkout began; until then answers say `fresh: false`, so an agent
+  up 12.4 to 12.6 s after the checkout began, measured on a busy machine (other jobs held CPU leases) on 2026-11-13 with v0.1.12, so not the norm (an idle machine gave 6.4 to 7.5 s on v0.1.7, 2026-10-10); until then answers say `fresh: false`, so an agent
   can fall back to its own scan. 0 of 64,454 fresh answers differed from ripgrep.
 
 Method, every table and the weak spots: [docs/BENCHMARKS.md](docs/BENCHMARKS.md). What is
