@@ -8,6 +8,8 @@
 
 <img src="docs/media/hero.svg" alt="ripgrep reads every one of 258,000 files in 4.0 s; unumsearch checks its index of clues, opens only the suspect files and finds the same answer in 0.22 s" width="900">
 
+<sub>Hero figures measured 2026-10-09.</sub>
+
 </div>
 
 ## The case in 30 seconds
