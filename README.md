@@ -8,6 +8,8 @@
 
 <img src="docs/media/hero.svg" alt="ripgrep reads every one of 258,000 files in 4.0 s; unumsearch checks its index of clues, opens only the suspect files and finds the same answer in 0.22 s" width="900">
 
+<img src="docs/media/story-hero.gif" alt="unumsearch: The detective for your code. Your AI agents search the same files all day; unumsearch keeps the clues. Whole tree median query time, ripgrep 15.1 (no index): 347 ms measured 2026-10-09. unumsearch is built into OpenUnum: its search tools use the daemon and fall back on their own." width="900">
+
 <sub>Hero figures measured 2026-10-09.</sub>
 
 </div>
@@ -143,6 +145,10 @@ Full list: [Reference → Security](docs/REFERENCE.md#security).
 [Reference](docs/REFERENCE.md) (every option, API, FAQ) · [Benchmarks](docs/BENCHMARKS.md) ·
 [Reliability](RELIABILITY.md) · [Integrations](docs/integrations/README.md) ·
 [Changelog](CHANGELOG.md) · [Agent Skill](skills/unumsearch/SKILL.md)
+
+## How it fits OpenUnum
+
+unumsearch is built into OpenUnum: its search tools use the daemon and fall back on their own.
 
 <sub>Apache-2.0 (includes the MPL-2.0 `nucleo-matcher` dependency) · built by [corpunum](https://github.com/corpunum) · sibling project:
 [UnumPingPong](https://github.com/corpunum/unumpingpong) (AI agents rally on your tasks; a referee decides who scores)</sub>

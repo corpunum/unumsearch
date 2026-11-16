@@ -1,0 +1,70 @@
+[
+  {
+    "text": "unumsearch",
+    "path": "name"
+  },
+  {
+    "text": "The detective for your code. Your AI agents search the same files all day; unumsearch keeps the clues.",
+    "path": "hook"
+  },
+  {
+    "text": "A trigram-indexed search engine for code and files that answers like ripgrep, usually in milliseconds, for AI coding agents and humans.",
+    "path": "oneLiner"
+  },
+  {
+    "text": "curl -fsSL https://github.com/corpunum/unumsearch/releases/latest/download/install.sh | sh",
+    "path": "quickstart.code"
+  },
+  {
+    "text": "347 ms",
+    "path": "measured.0.value"
+  },
+  {
+    "text": "2026-10-09",
+    "path": "measured.0.date"
+  },
+  {
+    "text": "64 ms",
+    "path": "measured.1.value"
+  },
+  {
+    "text": "2026-10-09",
+    "path": "measured.1.date"
+  },
+  {
+    "text": "Whole tree median query time",
+    "path": "measured.0.metric"
+  },
+  {
+    "text": "ripgrep",
+    "path": "measured.0.metric"
+  },
+  {
+    "text": "unumsearch daemon",
+    "path": "measured.1.metric"
+  },
+  {
+    "text": "18.6x",
+    "path": "measured.12.value"
+  },
+  {
+    "text": "unumsearch is built into OpenUnum: its search tools use the daemon and fall back on their own.",
+    "path": "openunumFit"
+  },
+  {
+    "text": "unumsearch",
+    "path": "name"
+  },
+  {
+    "text": "v0.1.12",
+    "path": "version"
+  },
+  {
+    "text": "Apache-2.0",
+    "path": "license"
+  },
+  {
+    "text": "Animated story header for unumsearch: the sourced hook and one-liner, the install quickstart, a race row comparing ripgrep at 347 ms with the daemon at 64 ms, the OpenUnum fit, and the end card.",
+    "path": "alt (fact-composed)"
+  }
+]

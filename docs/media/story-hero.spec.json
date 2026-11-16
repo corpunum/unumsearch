@@ -1,0 +1,23 @@
+{
+  "alt": "Animated story header for unumsearch: the sourced hook and one-liner, the install quickstart, a race row comparing ripgrep at 347 ms with the daemon at 64 ms, the OpenUnum fit, and the end card.",
+  "scenes": [
+    {"kind": "hook", "title": "name", "text": "hook"},
+    {"kind": "what", "text": "oneLiner"},
+    {"kind": "quickstart", "code": "quickstart.code"},
+    {
+      "kind": "numbers",
+      "rows": [
+        {
+          "label": {"path": "measured.0.metric", "part": "Whole tree median query time"},
+          "aName": {"path": "measured.0.metric", "part": "ripgrep"},
+          "bName": {"path": "measured.1.metric", "part": "unumsearch daemon"},
+          "a": "measured.0",
+          "b": "measured.1",
+          "badge": "measured.12"
+        }
+      ]
+    },
+    {"kind": "fit", "text": "openunumFit"},
+    {"kind": "end", "title": "name", "version": "version", "license": "license", "url": {"path": "links.5.url"}}
+  ]
+}

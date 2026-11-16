@@ -5,6 +5,8 @@
   "license": "Apache-2.0",
   "version": "v0.1.12",
   "updated": "2026-11-12",
+  "hook": "The detective for your code. Your AI agents search the same files all day; unumsearch keeps the clues.",
+  "openunumFit": "unumsearch is built into OpenUnum: its search tools use the daemon and fall back on their own.",
   "quickstart": {
     "lang": "bash",
     "code": "curl -fsSL https://github.com/corpunum/unumsearch/releases/latest/download/install.sh | sh"
