@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`no_gitignore_roots`**: roots (or directories below them) whose walk ignores `.gitignore`/`.ignore` files, for trees whose allowlist-style `.gitignore` hides most of their files. `excludes` and secret excludes still apply.
+
 ## v0.1.12 (2026-11-12) - Watches That Stay True
 
 - **`status` is not `fresh` before the daemon has looked at its roots.** In its first moments a

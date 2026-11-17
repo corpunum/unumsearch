@@ -137,11 +137,11 @@ fn list_impl(
     let mut wb = WalkBuilder::new(root);
     wb.max_depth(max_depth);
     wb.hidden(!cfg.hidden)
-        .git_ignore(cfg.gitignore)
-        .git_global(cfg.gitignore)
-        .git_exclude(cfg.gitignore)
-        .ignore(cfg.gitignore)
-        .parents(cfg.gitignore)
+        .git_ignore(cfg.gitignore_for(root))
+        .git_global(cfg.gitignore_for(root))
+        .git_exclude(cfg.gitignore_for(root))
+        .ignore(cfg.gitignore_for(root))
+        .parents(cfg.gitignore_for(root))
         .follow_links(false)
         .max_filesize(Some(cfg.max_file_size))
         .threads(cfg.thread_count().min(4));
@@ -240,11 +240,11 @@ pub fn reaches(cfg: &Config, unit: &Path, target: &Path) -> bool {
     let mut wb = WalkBuilder::new(unit);
     wb.max_depth(Some(depth))
         .hidden(!cfg.hidden)
-        .git_ignore(cfg.gitignore)
-        .git_global(cfg.gitignore)
-        .git_exclude(cfg.gitignore)
-        .ignore(cfg.gitignore)
-        .parents(cfg.gitignore)
+        .git_ignore(cfg.gitignore_for(unit))
+        .git_global(cfg.gitignore_for(unit))
+        .git_exclude(cfg.gitignore_for(unit))
+        .ignore(cfg.gitignore_for(unit))
+        .parents(cfg.gitignore_for(unit))
         .follow_links(false);
     let (unit_owned, target_owned) = (unit.to_path_buf(), target.to_path_buf());
     // Same pruning as `list`, restricted to the path towards `target`.
@@ -275,11 +275,11 @@ pub fn non_unit_children(cfg: &Config, root: &Path) -> Vec<String> {
     let mut wb = WalkBuilder::new(root);
     wb.max_depth(Some(1))
         .hidden(!cfg.hidden)
-        .git_ignore(cfg.gitignore)
-        .git_global(cfg.gitignore)
-        .git_exclude(cfg.gitignore)
-        .ignore(cfg.gitignore)
-        .parents(cfg.gitignore)
+        .git_ignore(cfg.gitignore_for(root))
+        .git_global(cfg.gitignore_for(root))
+        .git_exclude(cfg.gitignore_for(root))
+        .ignore(cfg.gitignore_for(root))
+        .parents(cfg.gitignore_for(root))
         .follow_links(false);
     let root_owned = root.to_path_buf();
     wb.filter_entry(move |e| {
@@ -323,11 +323,11 @@ pub fn corpus_entries(cfg: &Config, unit: &Path, dir: &Path) -> std::collections
     let excl = std::sync::Arc::new(exclude_matcher(cfg, unit));
     let mut wb = WalkBuilder::new(dir);
     wb.hidden(!cfg.hidden)
-        .git_ignore(cfg.gitignore)
-        .git_global(cfg.gitignore)
-        .git_exclude(cfg.gitignore)
-        .ignore(cfg.gitignore)
-        .parents(cfg.gitignore)
+        .git_ignore(cfg.gitignore_for(dir))
+        .git_global(cfg.gitignore_for(dir))
+        .git_exclude(cfg.gitignore_for(dir))
+        .ignore(cfg.gitignore_for(dir))
+        .parents(cfg.gitignore_for(dir))
         .follow_links(false)
         .max_filesize(Some(cfg.max_file_size))
         .max_depth(Some(1));

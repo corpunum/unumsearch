@@ -162,6 +162,10 @@ pub struct Config {
     pub default_excludes: bool,
     /// Respect .gitignore / .ignore / git exclude files (ripgrep semantics).
     pub gitignore: bool,
+    /// Roots (or directories under them) whose walk ignores `.gitignore`/`.ignore`
+    /// files even when `gitignore = true`: for allowlist-style ignore files that
+    /// would otherwise hide most of a tree. `excludes` still apply.
+    pub no_gitignore_roots: Vec<String>,
     /// Include hidden files and directories.
     pub hidden: bool,
     /// Files larger than this are not indexed (bytes).
@@ -217,6 +221,7 @@ impl Default for Config {
             excludes: vec![],
             default_excludes: true,
             gitignore: true,
+            no_gitignore_roots: vec![],
             hidden: true,
             max_file_size: 1 << 20,
             max_memory_mb: 96,
@@ -344,6 +349,15 @@ impl Config {
                 .unwrap_or_else(std::env::temp_dir)
                 .join("unumsearch"),
         }
+    }
+
+    /// Should the walk starting at `path` honor ignore files?
+    pub fn gitignore_for(&self, path: &Path) -> bool {
+        self.gitignore
+            && !self
+                .no_gitignore_roots
+                .iter()
+                .any(|r| path.starts_with(normalize(&expand_tilde(r))))
     }
 
     pub fn root_paths(&self) -> Vec<PathBuf> {
